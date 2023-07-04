@@ -66,7 +66,7 @@ optimizer = torch.optim.AdamW
 trainset = ['data/AllNLI.tsv.gz', 'data/stsbenchmark.tsv.gz']
 evalset = 'data/stsbenchmark.tsv.gz'
 output_path = "output"
-special_tokes = []  # ["[USR]", "[SYS]"]
+special_tokens = []  # ["[USR]", "[SYS]"]
 
 torch.manual_seed(DEFAULT_SEED)
 # np.random.seed(DEFAULT_SEED)
@@ -125,7 +125,7 @@ output_path = os.path.join(output_path, get_study_name(trainset, evalset, model_
 transformer_seq_encoder = models.Transformer(model_name)
 
 if special_tokens:
-    transformer_seq_encoder.tokenizer.add_tokens(tokens, special_tokens=True)
+    transformer_seq_encoder.tokenizer.add_tokens(special_tokens, special_tokens=True)
     transformer_seq_encoder.auto_model.resize_token_embeddings(len(transformer_seq_encoder.tokenizer))
 
 sentence_vector = models.Pooling(transformer_seq_encoder.get_word_embedding_dimension(), pooling_mode=pooling_mode)
