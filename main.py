@@ -3,7 +3,7 @@ Script to train sentence-BERT models with the provided trainset(s) and
 loss function(s). At every given number of training steps, the learned
 embeddings are evaluated on the provided similarity task.
 
-Usage: python main.py
+Usage: python main.py .... [TODO]
 
 @author: Sergio Burdisso (sergio.burdisso@idiap.ch)
 """
@@ -56,7 +56,7 @@ pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
 loss = ["multi-neg-ranking", "cosine-similarity"]  # ['softmax', 'multi-neg-ranking', 'cosine-similarity']  # multi-neg-ranking only positive pairs or positive pair + strong negative.
 # loss = "cosine-similarity"  # ['softmax', 'multi-neg-ranking', 'cosine-similarity']  # multi-neg-ranking only positive pairs or positive pair + strong negative.
 batch_size = 16
-num_epochs = 4
+num_epochs = 5
 evals_per_epoch = 50
 warmup_pct = 0.1
 learning_rate = 2e-5
@@ -93,14 +93,11 @@ def get_study_name(trainset:str, evalset:str, model_name:str, pooling_mode:str, 
 
 def on_evaluation(score, epoch, steps):
     # score is Spearman coorelation between predicted cosine-similarity and ground truth values
-    if not hasattr(on_evaluation, "last_epoch"):
-        on_evaluation.last_epoch = 0
-    # if it's the evaluation perform automatically after finishing the epoch, use custom epoch axis
-    if epoch != on_evaluation.last_epoch:
+
+    # if it's the evaluation perform automatically after finishing the epoch, use "custom epoch" step
+    if steps == -1:
         wandb.log({"epoch_score": score, "epoch": epoch + 1})
-        on_evaluation.last_epoch = epoch
-    else:
-        # if not use default wandb step
+    else:  # if not just use default wandb steps
         wandb.log({"score": score})
 
 
