@@ -9,8 +9,9 @@ from collections.abc import Iterable, Iterator
 class SimilarityDataReader:
     """
     DataReader class used to load data to train/evaluate sentence-embeddings.
-    Data is expected to be pairs of sentences and an optional ground truth value
-    (which could a similarity value or a label).
+    Data is expected to be a collection of either sentence pairs (sentence1, sentence2)
+    or triples (sentence1, sentence2, value) where value is the ground truth value (either
+    a label or similarity value).
     """
     @staticmethod
     def read_csv(
@@ -34,7 +35,7 @@ class SimilarityDataReader:
             f_open = gzip.open if path_csv.endswith(".gz") else open
 
             with f_open(path_csv, 'rt', encoding=encoding) as reader:
-                csv_file = csv.DictReader(reader, delimiter=delimiter, quoting=csv.QUOTE_NONE)
+                csv_file = csv.DictReader(reader, delimiter=delimiter)
                 for row in csv_file:
                     if not use_split or row[col_split] == use_split:
                         label = row[col_label] if col_label and col_label in row else None
@@ -49,7 +50,7 @@ class SimilarityDataReader:
         paths: Union[Union[Path, str], list[Union[Path, str]]],
         lines_are_documents: bool = True,
         encoding: str = "utf-8",
-    ) -> Iterator[tuple[str, dict]]:
+    ) -> Iterator[str]:
         """
         Lazily read in contents of files.
         """

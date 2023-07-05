@@ -22,6 +22,7 @@ class SimilarityDataset(Dataset):
         max_value, min_value = float("-inf"), float("inf")
         for (sent0, sent1, label) in data:
             if is_regression:
+                # print("label", label)
                 label = float(label)
 
                 max_value = max(max_value, label)
