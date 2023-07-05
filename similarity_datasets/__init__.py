@@ -1,2 +1,4 @@
 from .SimilarityDataset import SimilarityDataset
 from .SimilarityDatasetContrastive import SimilarityDatasetContrastive
+
+from .SimilarityDataReader import SimilarityDataReader
