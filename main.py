@@ -1,5 +1,5 @@
 """
-Script to train sentence-BERT models with the provided trainset(s) and
+Script to train sentence-BERT models with the provided training set(s) and
 loss function(s). At every given number of training steps, the learned
 embeddings are evaluated on the provided similarity task.
 
@@ -22,7 +22,7 @@ from sentence_transformers import models, losses, util, datasets
 from sentence_transformers import SentenceTransformer, LoggingHandler, InputExample
 from sentence_transformers.evaluation import SimilarityFunction, EmbeddingSimilarityEvaluator
 
-from similarity_datasets import SimilarityDataset, SimilarityDatasetContrastive
+from similarity_datasets import SimilarityDataReader, SimilarityDataset, SimilarityDatasetContrastive
 
 
 DEFAULT_SEED = 13
@@ -53,29 +53,35 @@ logging.basicConfig(format='%(asctime)s - %(message)s',
 
 model_name = sys.argv[1] if len(sys.argv) > 1 else 'bert-base-uncased'
 pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
-loss = ["multi-neg-ranking", "cosine-similarity"]  # ['softmax', 'multi-neg-ranking', 'cosine-similarity']  # multi-neg-ranking only positive pairs or positive pair + strong negative.
-# loss = "cosine-similarity"  # ['softmax', 'multi-neg-ranking', 'cosine-similarity']  # multi-neg-ranking only positive pairs or positive pair + strong negative.
+# loss = ["multi-neg-ranking", "cosine-similarity"]  # ['softmax', 'multi-neg-ranking', 'cosine-similarity', 'denoising-autoencoder']  # multi-neg-ranking only positive pairs or positive pair + strong negative.
+loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity'] # ['softmax', 'multi-neg-ranking', 'cosine-similarity', 'denoising-autoencoder']  # multi-neg-ranking only positive pairs or positive pair + strong negative.
 batch_size = 16
-num_epochs = 5
+num_epochs = 6
 evals_per_epoch = 50
 warmup_pct = 0.1
 learning_rate = 2e-5
 log_interval = 100
 optimizer = torch.optim.AdamW
-# trainset = 'data/stsbenchmark.tsv.gz'
-trainset = ['data/AllNLI.tsv.gz', 'data/stsbenchmark.tsv.gz']
-evalset = 'data/stsbenchmark.tsv.gz'
-output_path = "output"
+path_trainset = ['data/dialogue.txt', 'data/AllNLI.tsv', 'data/stsbenchmark.tsv']
+# path_trainset = 'data/stsbenchmark.tsv'
+# path_trainset = ['data/AllNLI.tsv', 'data/stsbenchmark.tsv']
+path_devset = 'data/stsbenchmark.tsv'
+path_testset = 'data/stsbenchmark.tsv'
+checkpoint_dir = "output"
+checkpoint_name = "checkpoint"
 special_tokens = []  # ["[USR]", "[SYS]"]
+project_name = None
 
 torch.manual_seed(DEFAULT_SEED)
 # np.random.seed(DEFAULT_SEED)
 random.seed(DEFAULT_SEED)
 
-if isinstance(trainset, str):
-    trainset = [trainset]
+if isinstance(path_trainset, str):
+    path_trainset = [path_trainset]
 if isinstance(loss, str):
     loss = [loss]
+
+# TODO: implement a "DialogueReader()" -> list of Turns with Speaker and Text
 
 
 def get_dataset_name(paths) -> str:
@@ -87,9 +93,9 @@ def get_dataset_name(paths) -> str:
     return '|'.join([filename[:filename.find('.')] for filename in filenames])
 
 
-def get_study_name(trainset:str, evalset:str, model_name:str, pooling_mode:str, loss:str) -> str:
+def get_study_name(path_trainset:str, path_devset:str, model_name:str, pooling_mode:str, loss:str) -> str:
     """Given the provided parameters return a string to identify the study."""
-    return f"train[{get_dataset_name(trainset)}]eval[{get_dataset_name(evalset)}]" + model_name.replace("/", "-") + f"[pooling-{pooling_mode}][loss-{'|'.join(loss)}]"
+    return f"train[{get_dataset_name(path_trainset)}]eval[{get_dataset_name(path_devset)}]" + model_name.replace("/", "-") + f"[pooling-{pooling_mode}][loss-{'|'.join(loss)}]"
 
 
 def on_evaluation(score, epoch, steps):
@@ -101,16 +107,16 @@ def on_evaluation(score, epoch, steps):
     else:  # if not just use default wandb steps
         wandb.log({"score": score})
 
-
+project_name = (project_name or get_study_name(path_trainset, path_devset, model_name, pooling_mode, loss))[:128]
 wandb.init(
-    project=get_study_name(trainset, evalset, model_name, pooling_mode, loss),  # maybe only evaluation set? so all runs are different models/configs evaluated on the same dataset
+    project=project_name,  # maybe only evaluation set? so all runs are different models/configs evaluated on the same dataset
     config={
         "learning_rate": learning_rate,
         "loss": loss,
         "model": model_name,
         "pooling_mode": pooling_mode,
-        "trainset": trainset,
-        "devset": evalset,
+        "trainset": path_trainset,
+        "devset": path_devset,
         "warmup_data_percentage": warmup_pct,
         "epochs": num_epochs,
         "batch_size": batch_size,
@@ -120,7 +126,7 @@ wandb.init(
 wandb.define_metric("epoch")
 wandb.define_metric("epoch_score", step_metric="epoch")
 
-output_path = os.path.join(output_path, get_study_name(trainset, evalset, model_name, pooling_mode, loss) + '-' + datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+path_output = os.path.join(checkpoint_dir, (checkpoint_name or project_name) + '-' + datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
 
 transformer_seq_encoder = models.Transformer(model_name)
 
@@ -132,61 +138,80 @@ sentence_vector = models.Pooling(transformer_seq_encoder.get_word_embedding_dime
 model = SentenceTransformer(modules=[transformer_seq_encoder, sentence_vector])
 wandb.watch(model, log_freq=100)
 
-logging.info(f"Reading training set ({trainset})")
-
+logging.info(f"Reading training sets ({path_trainset})")
 train_objectives = []
-for ix, path in enumerate(trainset):
+for ix, path in enumerate(path_trainset):
     loss_name = loss[:ix + 1][-1]
+    data = SimilarityDataReader.read_csv(path, delimiter="\t",
+                                         col_sent0="sent1", col_sent1="sent2", col_label="value",
+                                         col_split="split", use_split="train")
     if loss_name == "softmax":
-        data = SimilarityDataset(path, use_split="train", delimiter="\t")
-        num_labels = data.num_labels
-        data = DataLoader(data, shuffle=True, batch_size=batch_size)
+        data = SimilarityDataset(data)
         loss_fn = losses.SoftmaxLoss(model=model,
                                      sentence_embedding_dimension=model.get_sentence_embedding_dimension(),
-                                     num_labels=num_labels)
+                                     num_labels=data.num_labels)
     elif loss_name == "multi-neg-ranking":
-        data = datasets.NoDuplicatesDataLoader(
-            SimilarityDatasetContrastive(path, use_split="train", delimiter="\t", label_pos="entailment", label_neg="contradiction"),
-            batch_size=batch_size
-        )
+        data = SimilarityDatasetContrastive(data, label_pos="entailment", label_neg="contradiction")
         loss_fn = losses.MultipleNegativesRankingLoss(model=model)
     elif loss_name == "cosine-similarity":
-        data = DataLoader(SimilarityDataset(path, col_label="score", use_split="train", is_regression=True, delimiter="\t"),
-                        shuffle=True,
-                        batch_size=batch_size)
+        data = SimilarityDataset(data, is_regression=True, normalize_value=True)
         loss_fn = losses.CosineSimilarityLoss(model=model)
+    elif loss_name == "denoising-autoencoder":  # unsupervised
+        with open(path) as reader:
+            sentences = [line for line in reader.readlines() if line]
+        data = datasets.DenoisingAutoEncoderDataset(sentences)
+        loss_fn = losses.DenoisingAutoEncoderLoss(model, tie_encoder_decoder=True)
     else:
         raise ValueError(f"Loss {loss_name} not supported.")
 
-    train_objectives.append((data, loss_fn))
+    if loss_name == "multi-neg-ranking":
+        data_loader = datasets.NoDuplicatesDataLoader(data, batch_size=batch_size)
+    else:
+        data_loader = DataLoader(data, shuffle=True, batch_size=batch_size, drop_last=True)
 
+    train_objectives.append((data_loader, loss_fn))
 
+logging.info(f"Reading development set ({path_devset})")
+devset = SimilarityDataset(
+    SimilarityDataReader.read_csv(path_devset, delimiter="\t",
+                                  col_sent0="sent1", col_sent1="sent2", col_label="value",
+                                  col_split="split", use_split="dev"),
+    is_regression=True,
+    normalize_value=True
+)
 dev_evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
-    SimilarityDataset(evalset, col_label="score", use_split="dev", is_regression=True, delimiter="\t"),
-    main_similarity=SimilarityFunction.COSINE, batch_size=batch_size, name='devset'
+    devset, main_similarity=SimilarityFunction.COSINE, batch_size=batch_size, name='devset'
 )
 
-steps_per_epoch = min([len(trainset) for trainset, _ in train_objectives])  # trainingsets will be repeated as in a round-robin queue, 1 epochs = full smallest dataset, increase epoch to cover more parts of the bigger ones
+steps_per_epoch = min([len(data_loader) for data_loader, _ in train_objectives])  # trainingsets will be repeated as in a round-robin queue, 1 epochs = full smallest dataset, increase epoch to cover more parts of the bigger ones
 warmup_steps = math.ceil(len(data) * num_epochs * warmup_pct)
 logging.info("Warmup steps: {}".format(warmup_steps))
 
-
-# Train the model
 model.fit(train_objectives=train_objectives,
           evaluator=dev_evaluator,
           epochs=num_epochs,
           steps_per_epoch=steps_per_epoch,
           evaluation_steps=max(steps_per_epoch // evals_per_epoch, MIN_EVALUATION_STEP),
           warmup_steps=warmup_steps,
-          output_path=output_path,
+          output_path=path_output,
           optimizer_class=optimizer,
           optimizer_params={'lr': learning_rate},
-        #   use_amp=False,          #True, if your GPU supports FP16 operations
+        #   use_amp=False,          # True, if your GPU supports FP16 operations
           callback=on_evaluation)
 
-model = SentenceTransformer(output_path)
-test_evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
-    SimilarityDataset(evalset, col_label="score", use_split="test", is_regression=True, delimiter="\t"),
-    batch_size=batch_size, name='testset')
+logging.info(f"Loading best checkpoint from disk ({path_output})")
+model = SentenceTransformer(path_output)
 
-test_evaluator(model, output_path=output_path)
+logging.info(f"Reading the test set ({path_testset})")
+testset = SimilarityDataset(
+    SimilarityDataReader.read_csv(path_testset, delimiter="\t",
+                                  col_sent0="sent1", col_sent1="sent2", col_label="value",
+                                  col_split="split", use_split="test"),
+    is_regression=True,
+    normalize_value=True
+)
+test_evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
+    testset, main_similarity=SimilarityFunction.COSINE, batch_size=batch_size, name='testset'
+)
+logging.info(f"Evaluating model on the test set data...")
+test_evaluator(model, output_path=path_output)
