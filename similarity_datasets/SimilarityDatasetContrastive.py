@@ -5,47 +5,42 @@ import random
 from torch.utils.data import Dataset
 from sentence_transformers import InputExample
 
-class SimilarityDatasetContrastive(Dataset):
-    def __init__(self, path_csv, delimiter=",", col_sent0="sentence1", col_sent1="sentence2",
-                 col_label="value", col_split="split", use_split=None,
-                 label_pos=None, label_neg=None, encoding='utf8'):
+from . import SimilarityDataReader
+from typing import Any, Union, Optional
+from collections.abc import Iterable, Iterator
 
-        self.num_labels = 0
-        only_positives = not label_pos or not label_neg or not col_label  # if there's no labels, then we assume only possitive pairs are given
+class SimilarityDatasetContrastive(Dataset):
+    num_labels = 0
+
+    def __init__(self, data:Iterable, label_pos:str=None, label_neg:str=None):
+
+        only_positives = not label_pos or not label_neg  # if there's no labels, then we assume only possitive pairs are given
         valid_labels = [label_pos, label_neg]
 
         self.samples = []
         anchor2pos_neg_list = {}
-        f_open = gzip.open if path_csv.endswith(".gz") else open  # TODO: improve "if type == gzip" detection
-        with f_open(path_csv, 'rt', encoding=encoding) as reader:
-            csv_file = csv.DictReader(reader, delimiter=delimiter, quoting=csv.QUOTE_NONE)
+        for (sent0, sent1, label) in data:
+            sent0, sent1 = sent0.strip(), sent1.strip()
 
-            for row in csv_file:
-                if not use_split or row[col_split] == use_split:
-                    sent0, sent1 = row[col_sent0].strip(), row[col_sent1].strip()
+            if not only_positives and label is None:
+                only_positives = True
 
-                    if not only_positives:
-                        try:
-                            label = row[col_label]
-                        except KeyError:
-                            only_positives = True
+            if only_positives:
+                # Similarity is simetrical so we need to add both
+                self.samples.append(InputExample(texts=[sent0, sent1]))
+                # self.samples.append(InputExample(texts=[sent1, sent0]))
+            elif label in valid_labels:
 
-                    if only_positives:
-                        # Similarity is simetrical so we need to add both
-                        self.samples.append(InputExample(texts=[sent0, sent1]))
-                        # self.samples.append(InputExample(texts=[sent1, sent0]))
-                    elif label in valid_labels:
+                if sent0 not in anchor2pos_neg_list:
+                    anchor2pos_neg_list[sent0] = [set(), set()]  # neg, pos
+                if sent1 not in anchor2pos_neg_list:
+                    anchor2pos_neg_list[sent1] = [set(), set()]  # neg, pos
 
-                        if sent0 not in anchor2pos_neg_list:
-                            anchor2pos_neg_list[sent0] = [set(), set()]  # neg, pos
-                        if sent1 not in anchor2pos_neg_list:
-                            anchor2pos_neg_list[sent1] = [set(), set()]  # neg, pos
+                label2ix = int(label == label_pos)
 
-                        label2ix = int(label == label_pos)
-
-                        # Similarity is simetrical and negative is negative for both
-                        anchor2pos_neg_list[sent0][label2ix].add(sent1)
-                        anchor2pos_neg_list[sent1][label2ix].add(sent0)
+                # Similarity is simetrical and negative is negative for both
+                anchor2pos_neg_list[sent0][label2ix].add(sent1)
+                anchor2pos_neg_list[sent1][label2ix].add(sent0)
 
         if not only_positives:
             for anchor_sent, pos_neg_lists in anchor2pos_neg_list.items():
