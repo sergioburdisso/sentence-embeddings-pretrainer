@@ -17,6 +17,7 @@ import logging
 import argparse
 
 from datetime import datetime
+from typing import Any, Union, Optional, List
 from torch.utils.data import Dataset, DataLoader
 from sentence_transformers import models, losses, util, datasets
 from sentence_transformers import SentenceTransformer, LoggingHandler, InputExample
@@ -53,8 +54,7 @@ logging.basicConfig(format='%(asctime)s - %(message)s',
 
 model_name = sys.argv[1] if len(sys.argv) > 1 else 'bert-base-uncased'
 pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
-# loss = ["multi-neg-ranking", "cosine-similarity"]  # ['softmax', 'multi-neg-ranking', 'cosine-similarity', 'denoising-autoencoder']  # multi-neg-ranking only positive pairs or positive pair + strong negative.
-loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity'] # ['softmax', 'multi-neg-ranking', 'cosine-similarity', 'denoising-autoencoder']  # multi-neg-ranking only positive pairs or positive pair + strong negative.
+loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # multi-neg-ranking only positive pairs or positive pair + strong negative.
 batch_size = 16
 num_epochs = 6
 evals_per_epoch = 50
@@ -62,11 +62,9 @@ warmup_pct = 0.1
 learning_rate = 2e-5
 log_interval = 100
 optimizer = torch.optim.AdamW
-path_trainset = ['data/dialogue.txt', 'data/AllNLI.tsv', 'data/stsbenchmark.tsv']
-# path_trainset = 'data/stsbenchmark.tsv'
-# path_trainset = ['data/AllNLI.tsv', 'data/stsbenchmark.tsv']
-path_devset = 'data/stsbenchmark.tsv'
-path_testset = 'data/stsbenchmark.tsv'
+path_trainset = ['data/dialogue.txt', 'data/AllNLI_train.csv', 'data/stsbenchmark_train.csv']
+path_devset = 'data/stsbenchmark_dev.csv'
+path_testset = 'data/stsbenchmark_test.csv'
 checkpoint_dir = "output"
 checkpoint_name = "checkpoint"
 special_tokens = []  # ["[USR]", "[SYS]"]
@@ -81,11 +79,9 @@ if isinstance(path_trainset, str):
 if isinstance(loss, str):
     loss = [loss]
 
-# TODO: implement a "DialogueReader()" -> list of Turns with Speaker and Text
 
-
-def get_dataset_name(paths) -> str:
-    """Given a path return the file name."""
+def get_dataset_name(paths:Union[List[str], str]) -> str:
+    """Given a path, or a list of paths, return string with file name(s)."""
     if isinstance(paths, str):
         paths = [paths]
 
@@ -98,7 +94,7 @@ def get_study_name(path_trainset:str, path_devset:str, model_name:str, pooling_m
     return f"train[{get_dataset_name(path_trainset)}]eval[{get_dataset_name(path_devset)}]" + model_name.replace("/", "-") + f"[pooling-{pooling_mode}][loss-{'|'.join(loss)}]"
 
 
-def on_evaluation(score, epoch, steps):
+def on_evaluation(score:float, epoch:int, steps:int) -> None:
     # score is Spearman coorelation between predicted cosine-similarity and ground truth values
 
     # if it's the evaluation perform automatically after finishing the epoch, use "custom epoch" step
@@ -109,7 +105,7 @@ def on_evaluation(score, epoch, steps):
 
 project_name = (project_name or get_study_name(path_trainset, path_devset, model_name, pooling_mode, loss))[:128]
 wandb.init(
-    project=project_name,  # maybe only evaluation set? so all runs are different models/configs evaluated on the same dataset
+    project=project_name,
     config={
         "learning_rate": learning_rate,
         "loss": loss,
@@ -142,9 +138,8 @@ logging.info(f"Reading training sets ({path_trainset})")
 train_objectives = []
 for ix, path in enumerate(path_trainset):
     loss_name = loss[:ix + 1][-1]
-    data = SimilarityDataReader.read_csv(path, delimiter="\t",
-                                         col_sent0="sent1", col_sent1="sent2", col_label="value",
-                                         col_split="split", use_split="train")
+    data = SimilarityDataReader.read_csv(path, col_sent0="sent1", col_sent1="sent2", col_label="value")
+
     if loss_name == "softmax":
         data = SimilarityDataset(data)
         loss_fn = losses.SoftmaxLoss(model=model,
@@ -157,9 +152,8 @@ for ix, path in enumerate(path_trainset):
         data = SimilarityDataset(data, is_regression=True, normalize_value=True)
         loss_fn = losses.CosineSimilarityLoss(model=model)
     elif loss_name == "denoising-autoencoder":  # unsupervised
-        with open(path) as reader:
-            sentences = [line for line in reader.readlines() if line]
-        data = datasets.DenoisingAutoEncoderDataset(sentences)
+        sentences = SimilarityDataReader.read_docs(path, lines_are_documents=True)
+        data = datasets.DenoisingAutoEncoderDataset(list(sentences))
         loss_fn = losses.DenoisingAutoEncoderLoss(model, tie_encoder_decoder=True)
     else:
         raise ValueError(f"Loss {loss_name} not supported.")
@@ -173,9 +167,7 @@ for ix, path in enumerate(path_trainset):
 
 logging.info(f"Reading development set ({path_devset})")
 devset = SimilarityDataset(
-    SimilarityDataReader.read_csv(path_devset, delimiter="\t",
-                                  col_sent0="sent1", col_sent1="sent2", col_label="value",
-                                  col_split="split", use_split="dev"),
+    SimilarityDataReader.read_csv(path_devset, col_sent0="sent1", col_sent1="sent2", col_label="value"),
     is_regression=True,
     normalize_value=True
 )
@@ -204,9 +196,7 @@ model = SentenceTransformer(path_output)
 
 logging.info(f"Reading the test set ({path_testset})")
 testset = SimilarityDataset(
-    SimilarityDataReader.read_csv(path_testset, delimiter="\t",
-                                  col_sent0="sent1", col_sent1="sent2", col_label="value",
-                                  col_split="split", use_split="test"),
+    SimilarityDataReader.read_csv(path_testset, col_sent0="sent1", col_sent1="sent2", col_label="value"),
     is_regression=True,
     normalize_value=True
 )
