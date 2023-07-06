@@ -66,10 +66,11 @@ model_name = sys.argv[1] if len(sys.argv) > 1 else 'bert-base-uncased'
 pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
 loss = ["softmax", 'cosine-similarity'] #  ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # softmax, "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
 special_tokens = []  # ["[USR]", "[SYS]"]
-eval_metric = "accuracy"  # "accuracy", "coorelation"  (Spearman correlation)
+eval_metric = "f1-score"  # "coorelation"  (Spearman correlation) + sklearn classification_report metrics ("f1-score", "accuracy", "recall", "precision")
+eval_metric_avg = "macro"  # "macro", "micro", "weighted" (ignore if not classification, )
 max_seq_length = None
 batch_size = 16
-num_epochs = 3
+num_epochs = 1
 evals_per_epoch = 50
 warmup_pct = 0.1
 learning_rate = 2e-5
@@ -99,6 +100,7 @@ if not path_devset:
     path_devset = ''
 if not path_testset:
     path_testset = ''
+
 
 def get_dataset_name(paths:Union[List[str], str]) -> str:
     """Given a path, or a list of paths, return string with file name(s)."""
@@ -407,14 +409,16 @@ if path_devset:
         dev_evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
             devset, main_similarity=SimilarityFunction.COSINE, batch_size=batch_size, name='devset'
         )
-    elif eval_metric == "accuracy":
+    elif eval_metric in ["accuracy", "f1-score", "recall", "precision"]:
         devset = SimilarityDataset(
             SimilarityDataReader.read_csv(path_devset, col_sent0="sent1", col_sent1="sent2", col_label="value")
         )
         devset = DataLoader(devset, shuffle=False, batch_size=batch_size)
 
-        _, softmax_model = train_objectives[0]  # TODO: add the right softmax loss (not necessarily has to be the one at index [0])
-        dev_evaluator = ClassificationEvaluator(devset, softmax_model=softmax_model, metric="acc", name='devset')
+        _, softmax_model = train_objectives[0]  # TODO: search for the right softmax loss in the list (not necessarily has to be the one at index [0])
+        dev_evaluator = ClassificationEvaluator(devset, softmax_model=softmax_model,
+                                                metric=eval_metric, metric_avg=eval_metric_avg,
+                                                name='devset')
     else:
         raise ValueError(f"evaluation metric '{eval_metric}' is not supported.")
 
@@ -455,15 +459,17 @@ if path_testset:
         test_evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
             testset, main_similarity=SimilarityFunction.COSINE, batch_size=batch_size, name='testset'
         )
-    elif eval_metric == "accuracy":
+    elif eval_metric in ["accuracy", "f1-score", "recall", "precision"]:
         testset = SimilarityDataset(
             SimilarityDataReader.read_csv(path_testset, col_sent0="sent1", col_sent1="sent2", col_label="value")
         )
         testset = DataLoader(testset, shuffle=False, batch_size=batch_size)
         # testset.collate_fn = model.smart_batching_collate
 
-        _, softmax_model = train_objectives[0]  # TODO: add the right softmax loss (not necessarily has to be the one at index [0])
-        test_evaluator = ClassificationEvaluator(testset, softmax_model=softmax_model, metric="acc", name='testset')
+        _, softmax_model = train_objectives[0]  # TODO: search for the right softmax loss in the list (not necessarily has to be the one at index [0])
+        test_evaluator = ClassificationEvaluator(testset, softmax_model=softmax_model,
+                                                 metric=eval_metric, metric_avg=eval_metric_avg,
+                                                 name='testset')
     else:
         raise ValueError(f"evaluation metric '{eval_metric}' is not supported.")
     logging.info(f"Evaluating model on the test set data...")

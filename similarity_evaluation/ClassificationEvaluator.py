@@ -21,56 +21,60 @@ class ClassificationEvaluator(SentenceEvaluator):
     The results are written in a CSV. If a CSV already exists, then values are appended.
     """
 
-    def __init__(self, dataloader:DataLoader, metric:str="acc", metric_avg:str="macro-avg", name:str="", softmax_model:nn.Module=None, write_csv:bool=True):
+    def __init__(self, dataloader:DataLoader, metric:str="accuracy", metric_avg:str="macro", name:str="", softmax_model:nn.Module=None, write_csv:bool=True):
         """
         Constructs an evaluator for the given dataset
 
         :param dataloader:
             the data for the evaluation
         """
-        # TODO: implement other metrics and average/target class to used (e.g. "f1-score" with "macro-avg")
-
         self.dataloader = dataloader
         self.name = name
         self.softmax_model = softmax_model
         self.metric = metric
-        self.metric_avg = metric_avg
+        self.metric_avg = f"{metric_avg} avg"
 
         if name:
             name = "_"+name
 
         self.write_csv = write_csv
-        self.csv_file = "accuracy_evaluation"+name+"_results.csv"
-        self.csv_headers = ["epoch", "steps", "accuracy"]
+        self.csv_file = f"{metric_avg}_{metric}_evaluation{name}_results.csv"
+        self.csv_headers = ["epoch", "steps", f"{metric} ({self.metric_avg})"]
 
     def __call__(self, model, output_path: str = None, epoch: int = -1, steps: int = -1) -> float:
         model.eval()
-        total = 0
-        correct = 0
 
         if epoch != -1:
             if steps == -1:
-                out_txt = " after epoch {}:".format(epoch)
+                out_txt = f" after epoch {epoch}:"
             else:
-                out_txt = " in epoch {} after {} steps:".format(epoch, steps)
+                out_txt = f" in epoch {epoch} after {steps} steps:"
         else:
             out_txt = ":"
 
-        logger.info("Evaluation on the "+self.name+" dataset"+out_txt)
+        logger.info(f"Evaluation on the {self.name} dataset" + out_txt)
         self.dataloader.collate_fn = model.smart_batching_collate
-        for step, batch in enumerate(self.dataloader):
+        y_true, y_pred = [], []
+        for _, batch in enumerate(self.dataloader):
             features, label_ids = batch
             for idx in range(len(features)):
                 features[idx] = batch_to_device(features[idx], model.device)
             label_ids = label_ids.to(model.device)
             with torch.no_grad():
                 _, prediction = self.softmax_model(features, labels=None)
+            y_true.extend(torch.argmax(prediction, dim=1).tolist())
+            y_pred.extend(label_ids.tolist())
 
-            total += prediction.size(0)
-            correct += torch.argmax(prediction, dim=1).eq(label_ids).sum().item()
-        accuracy = correct/total
+        report = classification_report(y_true, y_pred, output_dict=True)
 
-        logger.info("Accuracy: {:.4f} ({}/{})\n".format(accuracy, correct, total))
+        if self.metric == "accuracy":
+            score = report["accuracy"]
+            metric_avg = ''
+        else:
+            score = report[self.metric_avg][self.metric]
+            metric_avg = f"({self.metric_avg})"
+
+        logger.info(f"{self.metric.capitalize()}{metric_avg}: {score:.4f}\n")
 
         if output_path is not None and self.write_csv:
             csv_path = os.path.join(output_path, self.csv_file)
@@ -78,10 +82,10 @@ class ClassificationEvaluator(SentenceEvaluator):
                 with open(csv_path, newline='', mode="w", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     writer.writerow(self.csv_headers)
-                    writer.writerow([epoch, steps, accuracy])
+                    writer.writerow([epoch, steps, score])
             else:
                 with open(csv_path, newline='', mode="a", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow([epoch, steps, accuracy])
+                    writer.writerow([epoch, steps, score])
 
-        return accuracy
+        return score
