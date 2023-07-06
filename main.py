@@ -31,6 +31,7 @@ from sentence_transformers.util import fullname, batch_to_device
 from sentence_transformers.evaluation import SentenceEvaluator, SimilarityFunction, EmbeddingSimilarityEvaluator
 from sentence_transformers.model_card_templates import ModelCardTemplate
 
+from similarity_evaluation import ClassificationEvaluator
 from similarity_datasets import SimilarityDataReader, SimilarityDataset, SimilarityDatasetContrastive
 
 
@@ -63,22 +64,27 @@ logging.basicConfig(format='%(asctime)s - %(message)s',
 
 model_name = sys.argv[1] if len(sys.argv) > 1 else 'bert-base-uncased'
 pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
-loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # multi-neg-ranking only positive pairs or positive pair + strong negative.
+loss = ["softmax", 'cosine-similarity'] #  ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # softmax, "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
 special_tokens = []  # ["[USR]", "[SYS]"]
+eval_metric = "accuracy"  # "accuracy", "coorelation"  (Spearman correlation)
 max_seq_length = None
 batch_size = 16
-num_epochs = 1
+num_epochs = 3
 evals_per_epoch = 50
 warmup_pct = 0.1
 learning_rate = 2e-5
 log_interval = 100
 optimizer = torch.optim.AdamW
-path_trainset = ['data/dialogue.txt', 'data/AllNLI_train.csv', 'data/stsbenchmark_train.csv']
-path_devset = 'data/stsbenchmark_dev.csv'
-path_testset = 'data/stsbenchmark_test.csv'
+path_trainset = ['data/AllNLI_train.csv', 'data/stsbenchmark_train.csv']
+# path_trainset = ['data/dialogue.txt', 'data/AllNLI_train.csv', 'data/stsbenchmark_train.csv']
+path_devset = 'data/AllNLI_dev.csv'
+# path_devset = 'data/stsbenchmark_dev.csv'
+path_testset = 'data/AllNLI_test.csv'
+# path_testset = 'data/stsbenchmark_test.csv'
 path_output = "output/test"
 checkpoint_path = "output/test/checkpoints"
-checkpoint_save_steps = 10
+checkpoint_saves_per_epoch = 10
+checkpoint_save_total_limit = 0
 project_name = None
 
 torch.manual_seed(DEFAULT_SEED)
@@ -89,7 +95,10 @@ if isinstance(path_trainset, str):
     path_trainset = [path_trainset]
 if isinstance(loss, str):
     loss = [loss]
-
+if not path_devset:
+    path_devset = ''
+if not path_testset:
+    path_testset = ''
 
 def get_dataset_name(paths:Union[List[str], str]) -> str:
     """Given a path, or a list of paths, return string with file name(s)."""
@@ -110,9 +119,9 @@ def on_evaluation(score:float, avg_losses:List[float], epoch:int, steps:int) -> 
 
     # if it's the evaluation perform automatically after finishing the epoch, use "custom epoch" step
     if steps == -1:
-        wandb.log({"epoch_score": score, "epoch": epoch + 1})
+        wandb.log({f"{eval_metric}_epoch": score, "epoch": epoch + 1})
     else:  # if not just use default wandb steps
-        metrics = {"score": score}
+        metrics = {eval_metric: score}
         if len(avg_losses) > 1:
             metrics.update({f"train_loss_obj{ix}" : avg_loss for ix, avg_loss in enumerate(avg_losses)})
         elif len(avg_losses) == 1:
@@ -202,7 +211,6 @@ def train(model,
     model._model_card_text = None
     model._model_card_vars['{TRAINING_SECTION}'] = ModelCardTemplate.__TRAINING_SECTION__.replace("{LOSS_FUNCTIONS}", info_loss_functions).replace("{FIT_PARAMETERS}", info_fit_parameters)
 
-
     if use_amp:
         from torch.cuda.amp import autocast
         scaler = torch.cuda.amp.GradScaler()
@@ -258,7 +266,7 @@ def train(model,
             loss_model.zero_grad()
             loss_model.train()
 
-        for _ in trange(steps_per_epoch, desc="Iteration", smoothing=0.05, disable=not show_progress_bar):
+        for _ in trange(steps_per_epoch, desc="Step", smoothing=0.05, disable=not show_progress_bar):
             for train_idx in range(num_train_objectives):
                 loss_model = loss_models[train_idx]
                 loss_log = loss_logs[train_idx]
@@ -387,21 +395,33 @@ for ix, path in enumerate(path_trainset):
 
     train_objectives.append((data_loader, loss_fn))
 
-logging.info(f"Reading development set ({path_devset})")
-devset = SimilarityDataset(
-    SimilarityDataReader.read_csv(path_devset, col_sent0="sent1", col_sent1="sent2", col_label="value"),
-    is_regression=True,
-    normalize_value=True
-)
-dev_evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
-    devset, main_similarity=SimilarityFunction.COSINE, batch_size=batch_size, name='devset'
-)
+dev_evaluator = None
+if path_devset:
+    logging.info(f"Reading development set ({path_devset})")
+    if eval_metric == "coorelation":
+        devset = SimilarityDataset(
+            SimilarityDataReader.read_csv(path_devset, col_sent0="sent1", col_sent1="sent2", col_label="value"),
+            is_regression=True,
+            normalize_value=True
+        )
+        dev_evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
+            devset, main_similarity=SimilarityFunction.COSINE, batch_size=batch_size, name='devset'
+        )
+    elif eval_metric == "accuracy":
+        devset = SimilarityDataset(
+            SimilarityDataReader.read_csv(path_devset, col_sent0="sent1", col_sent1="sent2", col_label="value")
+        )
+        devset = DataLoader(devset, shuffle=False, batch_size=batch_size)
+
+        _, softmax_model = train_objectives[0]  # TODO: add the right softmax loss (not necessarily has to be the one at index [0])
+        dev_evaluator = ClassificationEvaluator(devset, softmax_model=softmax_model, metric="acc", name='devset')
+    else:
+        raise ValueError(f"evaluation metric '{eval_metric}' is not supported.")
 
 steps_per_epoch = min([len(data_loader) for data_loader, _ in train_objectives])  # trainingsets will be repeated as in a round-robin queue, 1 epochs = full smallest dataset, increase epoch to cover more parts of the bigger ones
 warmup_steps = math.ceil(len(data) * num_epochs * warmup_pct)
 logging.info("Warmup steps: {}".format(warmup_steps))
 
-# model.fit(train_objectives=train_objectives,
 train(model, train_objectives=train_objectives,
       evaluator=dev_evaluator,
       epochs=num_epochs,
@@ -412,22 +432,39 @@ train(model, train_objectives=train_objectives,
       optimizer_class=optimizer,
       optimizer_params={'lr': learning_rate},
       checkpoint_path=checkpoint_path,
-      checkpoint_save_steps=max(steps_per_epoch // checkpoint_save_steps, MIN_CHECKPOINT_SAVE_STEPS),
-      checkpoint_save_total_limit=0,
+      checkpoint_save_steps=max(steps_per_epoch // checkpoint_saves_per_epoch, MIN_CHECKPOINT_SAVE_STEPS),
+      checkpoint_save_total_limit=checkpoint_save_total_limit,
     #   use_amp=False,          # True, if your GPU supports FP16 operations
       callback=on_evaluation)
 
-logging.info(f"Loading best checkpoint from disk ({path_output})")
-model = SentenceTransformer(path_output)
 
-logging.info(f"Reading the test set ({path_testset})")
-testset = SimilarityDataset(
-    SimilarityDataReader.read_csv(path_testset, col_sent0="sent1", col_sent1="sent2", col_label="value"),
-    is_regression=True,
-    normalize_value=True
-)
-test_evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
-    testset, main_similarity=SimilarityFunction.COSINE, batch_size=batch_size, name='testset'
-)
-logging.info(f"Evaluating model on the test set data...")
-test_evaluator(model, output_path=path_output)
+if path_testset:
+    logging.info(f"Loading best checkpoint from disk ({path_output})")
+    model = SentenceTransformer(path_output)
+
+    torch.cuda.empty_cache()
+    model.to(model._target_device)
+
+    logging.info(f"Reading the test set ({path_testset})")
+    if eval_metric == "coorelation":
+        testset = SimilarityDataset(
+            SimilarityDataReader.read_csv(path_testset, col_sent0="sent1", col_sent1="sent2", col_label="value"),
+            is_regression=True,
+            normalize_value=True
+        )
+        test_evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
+            testset, main_similarity=SimilarityFunction.COSINE, batch_size=batch_size, name='testset'
+        )
+    elif eval_metric == "accuracy":
+        testset = SimilarityDataset(
+            SimilarityDataReader.read_csv(path_testset, col_sent0="sent1", col_sent1="sent2", col_label="value")
+        )
+        testset = DataLoader(testset, shuffle=False, batch_size=batch_size)
+        # testset.collate_fn = model.smart_batching_collate
+
+        _, softmax_model = train_objectives[0]  # TODO: add the right softmax loss (not necessarily has to be the one at index [0])
+        test_evaluator = ClassificationEvaluator(testset, softmax_model=softmax_model, metric="acc", name='testset')
+    else:
+        raise ValueError(f"evaluation metric '{eval_metric}' is not supported.")
+    logging.info(f"Evaluating model on the test set data...")
+    test_evaluator(model, output_path=path_output)
