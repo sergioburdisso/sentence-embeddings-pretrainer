@@ -1,7 +1,5 @@
 """
-Script to train sentence-BERT models with the provided training set(s) and
-loss function(s). At every given number of training steps, the learned
-embeddings are evaluated on the provided similarity task.
+Script to train sentence-BERT-like models aimed at dialogue domain.
 
 Usage: python main.py .... [TODO]
 
@@ -16,6 +14,7 @@ import wandb
 import random
 import logging
 import argparse
+import numpy as np
 
 from datetime import datetime
 
@@ -45,26 +44,11 @@ logging.basicConfig(format='%(asctime)s - %(message)s',
                     handlers=[LoggingHandler()])
 
 
-# parser = argparse.ArgumentParser()
-# parser.add_argument("--train_batch_size", default=64, type=int)
-# parser.add_argument("--max_seq_length", default=300, type=int)
-# parser.add_argument("--model_name", required=True)
-# parser.add_argument("--max_passages", default=0, type=int)
-# parser.add_argument("--epochs", default=30, type=int)
-# parser.add_argument("--pooling", default="mean")
-# parser.add_argument("--negs_to_use", default=None, help="From which systems should negatives be used? Multiple systems seperated by comma. None = all")
-# parser.add_argument("--warmup_steps", default=1000, type=int)
-# parser.add_argument("--lr", default=2e-5, type=float)
-# parser.add_argument("--num_negs_per_system", default=5, type=int)
-# parser.add_argument("--use_pre_trained_model", default=False, action="store_true")
-# parser.add_argument("--use_all_queries", default=False, action="store_true")
-# args = parser.parse_args()
-
-# logging.info(str(args))
-
+# TODO: use argparse.ArgumentParser() below!!!
 model_name = sys.argv[1] if len(sys.argv) > 1 else 'bert-base-uncased'
 pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
 # loss = "softmax"
+# eval_metric = "f1-score"
 # path_trainset = 'data/AllNLI_train.csv'
 # path_devset = 'data/AllNLI_dev.csv'
 # path_testset = 'data/AllNLI_test.csv'
@@ -91,7 +75,7 @@ checkpoint_save_after_each_epoch = True
 project_name = None
 
 torch.manual_seed(DEFAULT_SEED)
-# np.random.seed(DEFAULT_SEED)
+np.random.seed(DEFAULT_SEED)
 random.seed(DEFAULT_SEED)
 
 if isinstance(path_trainset, str):
