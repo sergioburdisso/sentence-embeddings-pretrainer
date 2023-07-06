@@ -2,8 +2,6 @@
 Script to pre-train sentence-BERT-like models for task-oriented dialogue.
 
 Usage: python main.py .... [TODO]
-
-@author: Sergio Burdisso (sergio.burdisso@idiap.ch)
 """
 import os
 import sys
