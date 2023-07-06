@@ -1,5 +1,5 @@
 """
-Script to train sentence-BERT-like models aimed at dialogue domain.
+Script to pre-train sentence-BERT-like models for task-oriented dialogue.
 
 Usage: python main.py .... [TODO]
 

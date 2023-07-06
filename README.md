@@ -1,3 +1,3 @@
-# Sentence Embeddings Trainer
+# Sentence Embeddings Pre-Trainer
 
 _(WIP)_
