@@ -28,7 +28,7 @@ from sentence_transformers.util import fullname, batch_to_device
 from sentence_transformers.evaluation import SentenceEvaluator, SimilarityFunction, EmbeddingSimilarityEvaluator
 from sentence_transformers.model_card_templates import ModelCardTemplate
 
-from similarity_evaluation import ClassificationEvaluator
+from similarity_evaluation import ClassificationEvaluator, LossEvaluator
 from similarity_datasets import SimilarityDataReader, SimilarityDataset, SimilarityDatasetContrastive
 
 
@@ -55,11 +55,14 @@ pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
 # path_trainset = 'data/AllNLI_train.csv'
 # path_devset = 'data/AllNLI_dev.csv'
 # path_testset = 'data/AllNLI_test.csv'
-loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # softmax, "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
+
+loss = 'multi-neg-ranking'  # softmax, "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
+# loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # softmax, "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
 loss_contrastive_label_pos="entailment"
 loss_contrastive_label_neg="contradiction"
 special_tokens = []  # ["[USR]", "[SYS]"]
-eval_metric = "coorelation-score"  # "coorelation-score"  (Spearman correlation) + sklearn classification_report metrics ("f1-score", "accuracy", "recall", "precision")
+eval_metric = "loss"  # "coorelation-score"  (Spearman correlation) + sklearn classification_report metrics ("f1-score", "accuracy", "recall", "precision")
+# eval_metric = "coorelation-score"  # "coorelation-score"  (Spearman correlation) + sklearn classification_report metrics ("f1-score", "accuracy", "recall", "precision")
 eval_metric_avg = "macro"  # "macro", "micro", "weighted" (ignore if not classification, )
 max_seq_length = None
 batch_size = 16
@@ -69,9 +72,12 @@ warmup_pct = 0.1
 learning_rate = 2e-5
 log_interval = 100
 optimizer = torch.optim.AdamW
-path_trainset = ["data/dialogue.txt", "data/AllNLI_train.csv", "data/stsbenchmark_train.csv"]
-path_devset = "data/stsbenchmark_dev.csv"
-path_testset = "data/stsbenchmark_test.csv"
+path_trainset = "data/AllNLI_train.csv"
+path_devset = "data/AllNLI_dev.csv"
+path_testset = "data/AllNLI_test.csv"
+# path_trainset = ["data/dialogue.txt", "data/AllNLI_train.csv", "data/stsbenchmark_train.csv"]
+# path_devset = "data/stsbenchmark_dev.csv"
+# path_testset = "data/stsbenchmark_test.csv"
 path_output = "output/test"
 checkpoint_path = "output/test/checkpoints"
 checkpoint_saves_per_epoch = 0
@@ -107,6 +113,52 @@ def get_project_name(path_trainset:str, path_devset:str, model_name:str, pooling
     return f"train[{get_dataset_name(path_trainset)}]eval[{get_dataset_name(path_devset)}]" + model_name.replace("/", "-") + f"[pooling-{pooling_mode}][loss-{'|'.join(loss)}]"
 
 
+def get_dataset_by_loss(loss_name, data):
+    if loss_name == "softmax":
+        return SimilarityDataset(data)
+    elif loss_name == "multi-neg-ranking":
+        return SimilarityDatasetContrastive(data, label_pos=loss_contrastive_label_pos, label_neg=loss_contrastive_label_neg)
+    elif loss_name == "cosine-similarity":
+        return SimilarityDataset(data, is_regression=True, normalize_value=True)
+    elif loss_name == "denoising-autoencoder":  # unsupervised
+        return datasets.DenoisingAutoEncoderDataset(data)
+
+
+def get_dataloader_by_loss(loss_name, dataset, shuffle=True):
+    if loss_name == "multi-neg-ranking":
+        return datasets.NoDuplicatesDataLoader(dataset, batch_size=batch_size)
+
+    return DataLoader(dataset, shuffle=shuffle, batch_size=batch_size, drop_last=True)
+
+
+def get_evaluator_by_metric(path_evalset, metric, evaluator_name):
+    data = SimilarityDataReader.read_csv(path_evalset, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
+
+    if metric == "coorelation-score":
+        evalset = SimilarityDataset(data, is_regression=True, normalize_value=True)
+        return EmbeddingSimilarityEvaluator.from_input_examples(
+            evalset, main_similarity=SimilarityFunction.COSINE,
+            batch_size=batch_size, name=evaluator_name
+        )
+    elif metric in ["accuracy", "f1-score", "recall", "precision"]:
+        evalset = DataLoader(SimilarityDataset(data), shuffle=False, batch_size=batch_size)
+
+        _, softmax_loss = train_objectives[0]  # TODO: search for the right softmax loss in the list (not necessarily has to be the one at index [0])
+        return ClassificationEvaluator(evalset, softmax_model=softmax_loss,
+                                       metric=metric, metric_avg=eval_metric_avg,
+                                       name=evaluator_name)
+    elif metric == "loss":
+        # TODO: as above, allow the user to specify which loss from the provided list (not necessarily [0])
+        loss_name = loss[0]
+        _, target_loss = train_objectives[0]
+        evalset = get_dataloader_by_loss(loss_name,
+                                         get_dataset_by_loss(loss_name, data),
+                                         shuffle=False)
+        return LossEvaluator(evalset, target_loss, name=evaluator_name)
+    else:
+        raise ValueError(f"evaluation metric '{metric}' is not supported.")
+
+
 def on_evaluation(score:float, avg_losses:List[float], epoch:int, steps:int) -> None:
     # if it's the evaluation perform automatically after finishing the epoch, use "custom epoch" step
     if steps == -1:
@@ -120,7 +172,7 @@ def on_evaluation(score:float, avg_losses:List[float], epoch:int, steps:int) -> 
         wandb.log(metrics)
 
 
-def eval_during_training(model, evaluator, output_path, save_best_model, epoch, steps, loss_logs, callback):
+def eval_during_training(model, evaluator, output_path, save_best_model, epoch, steps, loss_values, callback):
     """Runs evaluation during the training"""
     eval_path = output_path
     if output_path is not None:
@@ -128,13 +180,14 @@ def eval_during_training(model, evaluator, output_path, save_best_model, epoch, 
         eval_path = os.path.join(output_path, "eval")
         os.makedirs(eval_path, exist_ok=True)
 
-    avg_losses = [sum(ll) / float(len(ll)) if len(ll) else 0 for ll in loss_logs]
+    # average loss per objective/task
+    avg_losses = [sum(ll) / float(len(ll)) if len(ll) else 0 for ll in loss_values]
 
     if evaluator is not None:
         score = evaluator(model, output_path=eval_path, epoch=epoch, steps=steps)
         if callback is not None:
             callback(score, avg_losses, epoch, steps)
-        if score > model.best_score:
+        if eval_metric != "loss" and score > model.best_score:
             model.best_score = score
             if save_best_model:
                 model.save(output_path)
@@ -248,7 +301,7 @@ def train(model,
     data_iterators = [iter(dataloader) for dataloader in dataloaders]
 
     num_train_objectives = len(train_objectives)
-    loss_logs = [[] for _ in range(num_train_objectives)]
+    loss_value_lists = [[] for _ in range(num_train_objectives)]
 
     skip_scheduler = False
     for epoch in trange(epochs, desc="Epoch", disable=not show_progress_bar):
@@ -261,7 +314,7 @@ def train(model,
         for _ in trange(steps_per_epoch, desc="Step", smoothing=0.05, disable=not show_progress_bar):
             for train_idx in range(num_train_objectives):
                 loss_model = loss_models[train_idx]
-                loss_log = loss_logs[train_idx]
+                loss_values = loss_value_lists[train_idx]
                 optimizer = optimizers[train_idx]
                 scheduler = schedulers[train_idx]
                 data_iterator = data_iterators[train_idx]
@@ -295,7 +348,7 @@ def train(model,
                     torch.nn.utils.clip_grad_norm_(loss_model.parameters(), max_grad_norm)
                     optimizer.step()
 
-                loss_log.append(loss_value.item())
+                loss_values.append(loss_value.item())
                 optimizer.zero_grad()
 
                 if not skip_scheduler:
@@ -305,13 +358,13 @@ def train(model,
             global_step += 1
 
             if evaluation_steps > 0 and training_steps % evaluation_steps == 0:
-                eval_during_training(model, evaluator, output_path, save_best_model, epoch, training_steps, loss_logs, callback)
+                eval_during_training(model, evaluator, output_path, save_best_model, epoch, training_steps, loss_value_lists, callback)
 
                 for ix, loss_model in enumerate(loss_models):
                     loss_model.zero_grad()
                     loss_model.train()
 
-                    loss_logs[ix][:] = []
+                    loss_value_lists[ix][:] = []
 
             if checkpoint_path is not None and checkpoint_save_steps is not None and checkpoint_save_steps > 0 and global_step % checkpoint_save_steps == 0:
                 model._save_checkpoint(checkpoint_path, checkpoint_save_total_limit, global_step)
@@ -319,9 +372,9 @@ def train(model,
         if checkpoint_save_after_each_epoch:
             model._save_checkpoint(checkpoint_path, None, f"epoch-{epoch}")
 
-        eval_during_training(model, evaluator, output_path, save_best_model, epoch, -1, loss_logs, callback)
+        eval_during_training(model, evaluator, output_path, save_best_model, epoch, -1, loss_value_lists, callback)
 
-    if evaluator is None and output_path is not None:   #No evaluator, but output path: save final model version
+    if (evaluator is None or eval_metric == "loss") and output_path is not None:
         model.save(output_path)
 
     if checkpoint_path is not None:
@@ -360,68 +413,47 @@ sentence_vector = models.Pooling(transformer_seq_encoder.get_word_embedding_dime
 model = SentenceTransformer(modules=[transformer_seq_encoder, sentence_vector])
 wandb.watch(model, log_freq=WANDB_LOG_FREQ)
 
-# Loading datasets
+# Loading datasets, data loaders and losses
 # Training sets
 logging.info(f"Reading training sets ({path_trainset})")
 train_objectives = []
 for ix, path in enumerate(path_trainset):
     loss_name = loss[:ix + 1][-1]
-    data = SimilarityDataReader.read_csv(path, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
+
+    # if it's unsupervised
+    if loss_name == "denoising-autoencoder":
+        # read raw txt file, each line is a sample sentence
+        data =list(SimilarityDataReader.read_docs(path, lines_are_documents=True))
+    else:
+        data = SimilarityDataReader.read_csv(path, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
+
+    data = get_dataset_by_loss(loss_name, data)
 
     if loss_name == "softmax":
-        data = SimilarityDataset(data)
         loss_fn = losses.SoftmaxLoss(model=model,
                                      sentence_embedding_dimension=model.get_sentence_embedding_dimension(),
                                      num_labels=data.num_labels)
     elif loss_name == "multi-neg-ranking":
-        data = SimilarityDatasetContrastive(data, label_pos=loss_contrastive_label_pos, label_neg=loss_contrastive_label_neg)
         loss_fn = losses.MultipleNegativesRankingLoss(model=model)
     elif loss_name == "cosine-similarity":
-        data = SimilarityDataset(data, is_regression=True, normalize_value=True)
         loss_fn = losses.CosineSimilarityLoss(model=model)
     elif loss_name == "denoising-autoencoder":  # unsupervised
-        sentences = SimilarityDataReader.read_docs(path, lines_are_documents=True)
-        data = datasets.DenoisingAutoEncoderDataset(list(sentences))
         loss_fn = losses.DenoisingAutoEncoderLoss(model, tie_encoder_decoder=True)
     else:
         raise ValueError(f"Loss {loss_name} not supported.")
 
-    if loss_name == "multi-neg-ranking":
-        data_loader = datasets.NoDuplicatesDataLoader(data, batch_size=batch_size)
-    else:
-        data_loader = DataLoader(data, shuffle=True, batch_size=batch_size, drop_last=True)
+    train_objectives.append((get_dataloader_by_loss(loss_name, data), loss_fn))
 
-    train_objectives.append((data_loader, loss_fn))
 
 # Evaluation/development set
 dev_evaluator = None
 if path_devset:
     logging.info(f"Reading development set ({path_devset})")
-    if eval_metric == "coorelation-score":
-        devset = SimilarityDataset(
-            SimilarityDataReader.read_csv(path_devset, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL),
-            is_regression=True,
-            normalize_value=True
-        )
-        dev_evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
-            devset, main_similarity=SimilarityFunction.COSINE, batch_size=batch_size, name='devset'
-        )
-    elif eval_metric in ["accuracy", "f1-score", "recall", "precision"]:
-        devset = SimilarityDataset(
-            SimilarityDataReader.read_csv(path_devset, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
-        )
-        devset = DataLoader(devset, shuffle=False, batch_size=batch_size)
-
-        _, softmax_model = train_objectives[0]  # TODO: search for the right softmax loss in the list (not necessarily has to be the one at index [0])
-        dev_evaluator = ClassificationEvaluator(devset, softmax_model=softmax_model,
-                                                metric=eval_metric, metric_avg=eval_metric_avg,
-                                                name='devset')
-    else:
-        raise ValueError(f"evaluation metric '{eval_metric}' is not supported.")
+    dev_evaluator = get_evaluator_by_metric(path_devset, eval_metric, evaluator_name="devset")
 
 # Training
-steps_per_epoch = min([len(data_loader) for data_loader, _ in train_objectives])  # trainingsets will be repeated as in a round-robin queue, 1 epochs = full smallest dataset, increase epoch to cover more parts of the bigger ones
-warmup_steps = math.ceil(len(data) * num_epochs * warmup_pct)
+steps_per_epoch = min([len(data_loader) for data_loader, _ in train_objectives])  # if multiple trainingsets, sets will be repeated as in a round-robin queue, 1 epochs = full smallest dataset, increase epoch to cover more parts of the bigger ones
+warmup_steps = math.ceil(steps_per_epoch * num_epochs * warmup_pct)
 logging.info("Warmup steps: {}".format(warmup_steps))
 
 train(model, train_objectives=train_objectives,
@@ -442,33 +474,14 @@ train(model, train_objectives=train_objectives,
 
 # If test set, then evaluate on test set...
 if path_testset:
-    logging.info(f"Loading best checkpoint from disk ({path_output})")
+    logging.info(f"Loading final model from disk ({path_output})")
     model = SentenceTransformer(path_output)
 
     torch.cuda.empty_cache()
     model.to(model._target_device)
 
     logging.info(f"Reading the test set ({path_testset})")
-    if eval_metric == "coorelation-score":
-        testset = SimilarityDataset(
-            SimilarityDataReader.read_csv(path_testset, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL),
-            is_regression=True,
-            normalize_value=True
-        )
-        test_evaluator = EmbeddingSimilarityEvaluator.from_input_examples(
-            testset, main_similarity=SimilarityFunction.COSINE, batch_size=batch_size, name='testset'
-        )
-    elif eval_metric in ["accuracy", "f1-score", "recall", "precision"]:
-        testset = SimilarityDataset(
-            SimilarityDataReader.read_csv(path_testset, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
-        )
-        testset = DataLoader(testset, shuffle=False, batch_size=batch_size)
+    test_evaluator = get_evaluator_by_metric(path_testset, eval_metric, evaluator_name="testset")
 
-        _, softmax_model = train_objectives[0]  # TODO: search for the right softmax loss in the list (not necessarily has to be the one at index [0])
-        test_evaluator = ClassificationEvaluator(testset, softmax_model=softmax_model,
-                                                 metric=eval_metric, metric_avg=eval_metric_avg,
-                                                 name='testset')
-    else:
-        raise ValueError(f"evaluation metric '{eval_metric}' is not supported.")
     logging.info(f"Evaluating model on the test set data...")
     test_evaluator(model, output_path=path_output)

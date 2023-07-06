@@ -1,1 +1,2 @@
 from .ClassificationEvaluator import ClassificationEvaluator
+from .LossEvaluator import LossEvaluator

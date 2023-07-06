@@ -12,14 +12,14 @@ from sentence_transformers.evaluation import SentenceEvaluator
 logger = logging.getLogger(__name__)
 
 
-class ClassificationEvaluator(SentenceEvaluator):
+class LossEvaluator(SentenceEvaluator):
     """
-    Evaluate a model based on classification on a labeled dataset
+    Evaluate a model computing the loss on the provided dataset
 
     The results are written in a CSV. If a CSV already exists, then values are appended.
     """
 
-    def __init__(self, dataloader:DataLoader, metric:str="accuracy", metric_avg:str="macro", name:str="", softmax_model:nn.Module=None, write_csv:bool=True):
+    def __init__(self, dataloader:DataLoader, loss_model:nn.Module=None, name:str='', write_csv:bool=True):
         """
         Constructs an evaluator for the given dataset
 
@@ -28,16 +28,14 @@ class ClassificationEvaluator(SentenceEvaluator):
         """
         self.dataloader = dataloader
         self.name = name
-        self.softmax_model = softmax_model
-        self.metric = metric
-        self.metric_avg = f"{metric_avg} avg"
+        self.loss_model = loss_model
 
         if name:
             name = "_" + name
 
         self.write_csv = write_csv
-        self.csv_file = f"{metric_avg}_{metric}_evaluation{name}_results.csv"
-        self.csv_headers = ["epoch", "steps", f"{metric} ({self.metric_avg})"]
+        self.csv_file = f"loss_evaluation{name}_results.csv"
+        self.csv_headers = ["epoch", "steps", "loss"]
 
     def __call__(self, model, output_path: str = None, epoch: int = -1, steps: int = -1) -> float:
         model.eval()
@@ -52,27 +50,17 @@ class ClassificationEvaluator(SentenceEvaluator):
 
         logger.info(f"Evaluation on the {self.name} dataset" + out_txt)
         self.dataloader.collate_fn = model.smart_batching_collate
-        y_true, y_pred = [], []
+        loss_values = []
         for _, batch in enumerate(self.dataloader):
-            features, label_ids = batch
-            for idx in range(len(features)):
-                features[idx] = batch_to_device(features[idx], model.device)
-            label_ids = label_ids.to(model.device)
+            features, labels = batch
+            labels = labels.to(model._target_device)
+            features = list(map(lambda batch: batch_to_device(batch, model._target_device), features))
             with torch.no_grad():
-                _, prediction = self.softmax_model(features, labels=None)
-            y_true.extend(torch.argmax(prediction, dim=1).tolist())
-            y_pred.extend(label_ids.tolist())
+                loss_values.append(self.loss_model(features, labels).item())
 
-        report = classification_report(y_true, y_pred, output_dict=True)
+        score = sum(loss_values) / float(len(loss_values)) if len(loss_values) else 0
 
-        if self.metric == "accuracy":
-            score = report["accuracy"]
-            metric_avg = ''
-        else:
-            score = report[self.metric_avg][self.metric]
-            metric_avg = f"({self.metric_avg})"
-
-        logger.info(f"{self.metric.capitalize()}{metric_avg}: {score:.4f}\n")
+        logger.info(f"Loss: {score:.4f}\n")
 
         if output_path is not None and self.write_csv:
             csv_path = os.path.join(output_path, self.csv_file)
