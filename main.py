@@ -64,28 +64,30 @@ logging.basicConfig(format='%(asctime)s - %(message)s',
 
 model_name = sys.argv[1] if len(sys.argv) > 1 else 'bert-base-uncased'
 pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
-loss = ["softmax", 'cosine-similarity'] #  ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # softmax, "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
+# loss = "softmax"
+# path_trainset = 'data/AllNLI_train.csv'
+# path_devset = 'data/AllNLI_dev.csv'
+# path_testset = 'data/AllNLI_test.csv'
+loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # softmax, "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
 special_tokens = []  # ["[USR]", "[SYS]"]
-eval_metric = "f1-score"  # "coorelation"  (Spearman correlation) + sklearn classification_report metrics ("f1-score", "accuracy", "recall", "precision")
+eval_metric = "coorelation"  # "coorelation"  (Spearman correlation) + sklearn classification_report metrics ("f1-score", "accuracy", "recall", "precision")
 eval_metric_avg = "macro"  # "macro", "micro", "weighted" (ignore if not classification, )
 max_seq_length = None
 batch_size = 16
-num_epochs = 1
+num_epochs = 5
 evals_per_epoch = 50
 warmup_pct = 0.1
 learning_rate = 2e-5
 log_interval = 100
 optimizer = torch.optim.AdamW
-path_trainset = ['data/AllNLI_train.csv', 'data/stsbenchmark_train.csv']
-# path_trainset = ['data/dialogue.txt', 'data/AllNLI_train.csv', 'data/stsbenchmark_train.csv']
-path_devset = 'data/AllNLI_dev.csv'
-# path_devset = 'data/stsbenchmark_dev.csv'
-path_testset = 'data/AllNLI_test.csv'
-# path_testset = 'data/stsbenchmark_test.csv'
+path_trainset = ["data/dialogue.txt", "data/AllNLI_train.csv", "data/stsbenchmark_train.csv"]
+path_devset = "data/stsbenchmark_dev.csv"
+path_testset = "data/stsbenchmark_test.csv"
 path_output = "output/test"
 checkpoint_path = "output/test/checkpoints"
-checkpoint_saves_per_epoch = 10
+checkpoint_saves_per_epoch = 0
 checkpoint_save_total_limit = 0
+checkpoint_save_after_each_epoch = True
 project_name = None
 
 torch.manual_seed(DEFAULT_SEED)
@@ -173,7 +175,8 @@ def train(model,
           show_progress_bar: bool = True,
           checkpoint_path: str = None,
           checkpoint_save_steps: int = 500,
-          checkpoint_save_total_limit: int = 0
+          checkpoint_save_total_limit: int = 0,
+          checkpoint_save_after_each_epoch: bool = False,
         ):
     """
     Train the model with the given training objective
@@ -326,6 +329,9 @@ def train(model,
             if checkpoint_path is not None and checkpoint_save_steps is not None and checkpoint_save_steps > 0 and global_step % checkpoint_save_steps == 0:
                 model._save_checkpoint(checkpoint_path, checkpoint_save_total_limit, global_step)
 
+        if checkpoint_save_after_each_epoch:
+            model._save_checkpoint(checkpoint_path, None, f"epoch-{epoch}")
+
         eval_during_training(model, evaluator, output_path, save_best_model, epoch, -1, loss_logs, callback)
 
     if evaluator is None and output_path is not None:   #No evaluator, but output path: save final model version
@@ -430,14 +436,15 @@ train(model, train_objectives=train_objectives,
       evaluator=dev_evaluator,
       epochs=num_epochs,
       steps_per_epoch=steps_per_epoch,
-      evaluation_steps=max(steps_per_epoch // evals_per_epoch, MIN_EVALUATION_STEPS),
+      evaluation_steps=max(steps_per_epoch // evals_per_epoch, MIN_EVALUATION_STEPS) if evals_per_epoch > 0 else 0,
       warmup_steps=warmup_steps,
       output_path=path_output,
       optimizer_class=optimizer,
       optimizer_params={'lr': learning_rate},
       checkpoint_path=checkpoint_path,
-      checkpoint_save_steps=max(steps_per_epoch // checkpoint_saves_per_epoch, MIN_CHECKPOINT_SAVE_STEPS),
+      checkpoint_save_steps=max(steps_per_epoch // checkpoint_saves_per_epoch, MIN_CHECKPOINT_SAVE_STEPS) if checkpoint_saves_per_epoch else 0,
       checkpoint_save_total_limit=checkpoint_save_total_limit,
+      checkpoint_save_after_each_epoch=checkpoint_save_after_each_epoch,
     #   use_amp=False,          # True, if your GPU supports FP16 operations
       callback=on_evaluation)
 
