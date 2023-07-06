@@ -14,9 +14,7 @@ logger = logging.getLogger(__name__)
 
 class ClassificationEvaluator(SentenceEvaluator):
     """
-    Evaluate a model based on its accuracy on a labeled dataset
-
-    This requires a model with LossFunction.SOFTMAX
+    Evaluate a model based on classification on a labeled dataset
 
     The results are written in a CSV. If a CSV already exists, then values are appended.
     """
