@@ -34,9 +34,11 @@ from similarity_evaluation import ClassificationEvaluator
 from similarity_datasets import SimilarityDataReader, SimilarityDataset, SimilarityDatasetContrastive
 
 
+# TODO: use config file instead for below
 DEFAULT_SEED = 13
 MIN_EVALUATION_STEPS = 100
 MIN_CHECKPOINT_SAVE_STEPS = 50
+WANDB_LOG_FREQ = 100
 
 logging.basicConfig(format='%(asctime)s - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S',
@@ -103,8 +105,6 @@ def get_study_name(path_trainset:str, path_devset:str, model_name:str, pooling_m
 
 
 def on_evaluation(score:float, avg_losses:List[float], epoch:int, steps:int) -> None:
-    # score is Spearman coorelation between predicted cosine-similarity and ground truth values
-
     # if it's the evaluation perform automatically after finishing the epoch, use "custom epoch" step
     if steps == -1:
         wandb.log({f"{eval_metric}_epoch": score, "epoch": epoch + 1})
@@ -344,8 +344,6 @@ wandb.init(
 wandb.define_metric("epoch")
 wandb.define_metric("epoch_score", step_metric="epoch")
 
-# path_output = os.path.join(checkpoint_dir, (checkpoint_name or project_name) + '-' + datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-
 transformer_seq_encoder = models.Transformer(model_name, max_seq_length=max_seq_length)
 
 if special_tokens:
@@ -354,7 +352,7 @@ if special_tokens:
 
 sentence_vector = models.Pooling(transformer_seq_encoder.get_word_embedding_dimension(), pooling_mode=pooling_mode)
 model = SentenceTransformer(modules=[transformer_seq_encoder, sentence_vector])
-wandb.watch(model, log_freq=100)
+wandb.watch(model, log_freq=WANDB_LOG_FREQ)
 
 logging.info(f"Reading training sets ({path_trainset})")
 train_objectives = []
@@ -429,10 +427,10 @@ train(model, train_objectives=train_objectives,
       checkpoint_save_steps=max(steps_per_epoch // checkpoint_saves_per_epoch, MIN_CHECKPOINT_SAVE_STEPS) if checkpoint_saves_per_epoch else 0,
       checkpoint_save_total_limit=checkpoint_save_total_limit,
       checkpoint_save_after_each_epoch=checkpoint_save_after_each_epoch,
-    #   use_amp=False,          # True, if your GPU supports FP16 operations
       callback=on_evaluation)
 
 
+# If evaluation on test set...
 if path_testset:
     logging.info(f"Loading best checkpoint from disk ({path_output})")
     model = SentenceTransformer(path_output)
@@ -455,7 +453,6 @@ if path_testset:
             SimilarityDataReader.read_csv(path_testset, col_sent0="sent1", col_sent1="sent2", col_label="value")
         )
         testset = DataLoader(testset, shuffle=False, batch_size=batch_size)
-        # testset.collate_fn = model.smart_batching_collate
 
         _, softmax_model = train_objectives[0]  # TODO: search for the right softmax loss in the list (not necessarily has to be the one at index [0])
         test_evaluator = ClassificationEvaluator(testset, softmax_model=softmax_model,
