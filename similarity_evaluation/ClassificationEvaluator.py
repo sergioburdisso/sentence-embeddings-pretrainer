@@ -4,6 +4,7 @@ import torch
 import logging
 
 from torch import nn
+from tqdm import tqdm
 from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report
 from sentence_transformers.util import batch_to_device
@@ -19,7 +20,9 @@ class ClassificationEvaluator(SentenceEvaluator):
     The results are written in a CSV. If a CSV already exists, then values are appended.
     """
 
-    def __init__(self, dataloader:DataLoader, metric:str="accuracy", metric_avg:str="macro", name:str="", softmax_model:nn.Module=None, write_csv:bool=True):
+    def __init__(self, dataloader:DataLoader, metric:str="accuracy", metric_avg:str="macro",
+                 name:str="", softmax_model:nn.Module=None,
+                 write_csv:bool=True, show_progress_bar:bool=True):
         """
         Constructs an evaluator for the given dataset
 
@@ -31,6 +34,7 @@ class ClassificationEvaluator(SentenceEvaluator):
         self.softmax_model = softmax_model
         self.metric = metric
         self.metric_avg = f"{metric_avg} avg"
+        self.show_progress_bar = show_progress_bar
 
         if name:
             name = "_" + name
@@ -53,7 +57,7 @@ class ClassificationEvaluator(SentenceEvaluator):
         logger.info(f"Evaluation on the {self.name} dataset" + out_txt)
         self.dataloader.collate_fn = model.smart_batching_collate
         y_true, y_pred = [], []
-        for _, batch in enumerate(self.dataloader):
+        for batch in tqdm(self.dataloader, desc="Evaluation", disable=not self.show_progress_bar, leave=False):
             features, label_ids = batch
             for idx in range(len(features)):
                 features[idx] = batch_to_device(features[idx], model.device)

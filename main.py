@@ -47,7 +47,7 @@ logging.basicConfig(format='%(asctime)s - %(message)s',
                     handlers=[LoggingHandler()])
 
 
-# TODO: use argparse.ArgumentParser() below!!!
+# TODO: use argparse.ArgumentParser() or Hydra for below!!!
 model_name = sys.argv[1] if len(sys.argv) > 1 else 'bert-base-uncased'
 pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
 # loss = "softmax"
@@ -56,8 +56,8 @@ pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
 # path_devset = 'data/AllNLI_dev.csv'
 # path_testset = 'data/AllNLI_test.csv'
 
-loss = 'multi-neg-ranking'  # softmax, "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
-# loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # softmax, "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
+loss = 'denoising-autoencoder'
+# loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # "softmax", "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
 loss_contrastive_label_pos="entailment"
 loss_contrastive_label_neg="contradiction"
 special_tokens = []  # ["[USR]", "[SYS]"]
@@ -72,9 +72,9 @@ warmup_pct = 0.1
 learning_rate = 2e-5
 log_interval = 100
 optimizer = torch.optim.AdamW
-path_trainset = "data/AllNLI_train.csv"
-path_devset = "data/AllNLI_dev.csv"
-path_testset = "data/AllNLI_test.csv"
+path_trainset = "data/dialogue_train_small.txt"
+path_devset = "data/dialogue_eval.txt"
+path_testset = "data/dialogue_eval.txt"
 # path_trainset = ["data/dialogue.txt", "data/AllNLI_train.csv", "data/stsbenchmark_train.csv"]
 # path_devset = "data/stsbenchmark_dev.csv"
 # path_testset = "data/stsbenchmark_test.csv"
@@ -132,7 +132,16 @@ def get_dataloader_by_loss(loss_name, dataset, shuffle=True):
 
 
 def get_evaluator_by_metric(path_evalset, metric, evaluator_name):
-    data = SimilarityDataReader.read_csv(path_evalset, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
+    # assumming the first loss is the used (TODO: specify other loss, not only at [0])
+    loss_ix = 0
+    loss_name = loss[loss_ix]
+
+    # if it's unsupervised
+    if metric == "loss" and loss_name == "denoising-autoencoder":
+        # read raw txt file, each line is a sample sentence
+        data =list(SimilarityDataReader.read_docs(path_evalset, lines_are_documents=True))
+    else:
+        data = SimilarityDataReader.read_csv(path_evalset, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
 
     if metric == "coorelation-score":
         evalset = SimilarityDataset(data, is_regression=True, normalize_value=True)
@@ -143,14 +152,12 @@ def get_evaluator_by_metric(path_evalset, metric, evaluator_name):
     elif metric in ["accuracy", "f1-score", "recall", "precision"]:
         evalset = DataLoader(SimilarityDataset(data), shuffle=False, batch_size=batch_size)
 
-        _, softmax_loss = train_objectives[0]  # TODO: search for the right softmax loss in the list (not necessarily has to be the one at index [0])
+        _, softmax_loss = train_objectives[loss_ix]
         return ClassificationEvaluator(evalset, softmax_model=softmax_loss,
                                        metric=metric, metric_avg=eval_metric_avg,
                                        name=evaluator_name)
     elif metric == "loss":
-        # TODO: as above, allow the user to specify which loss from the provided list (not necessarily [0])
-        loss_name = loss[0]
-        _, target_loss = train_objectives[0]
+        _, target_loss = train_objectives[loss_ix]
         evalset = get_dataloader_by_loss(loss_name,
                                          get_dataset_by_loss(loss_name, data),
                                          shuffle=False)
@@ -402,7 +409,7 @@ wandb.init(
 wandb.define_metric("epoch")
 wandb.define_metric("epoch_score", step_metric="epoch")
 
-# Setting up the model
+# Set up the model
 transformer_seq_encoder = models.Transformer(model_name, max_seq_length=max_seq_length)
 
 if special_tokens:
