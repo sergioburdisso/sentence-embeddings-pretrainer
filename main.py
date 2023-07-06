@@ -34,6 +34,9 @@ from similarity_datasets import SimilarityDataReader, SimilarityDataset, Similar
 
 # TODO: use config file instead for below
 DEFAULT_SEED = 13
+DEFAULT_NAME_COL_SENT1 = "sent1"
+DEFAULT_NAME_COL_SENT2 = "sent2"
+DEFAULT_NAME_COL_LABEL = "value"
 MIN_EVALUATION_STEPS = 100
 MIN_CHECKPOINT_SAVE_STEPS = 50
 WANDB_LOG_FREQ = 100
@@ -53,12 +56,14 @@ pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
 # path_devset = 'data/AllNLI_dev.csv'
 # path_testset = 'data/AllNLI_test.csv'
 loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # softmax, "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
+loss_contrastive_label_pos="entailment"
+loss_contrastive_label_neg="contradiction"
 special_tokens = []  # ["[USR]", "[SYS]"]
 eval_metric = "coorelation-score"  # "coorelation-score"  (Spearman correlation) + sklearn classification_report metrics ("f1-score", "accuracy", "recall", "precision")
 eval_metric_avg = "macro"  # "macro", "micro", "weighted" (ignore if not classification, )
 max_seq_length = None
 batch_size = 16
-num_epochs = 5
+num_epochs = 1
 evals_per_epoch = 50
 warmup_pct = 0.1
 learning_rate = 2e-5
@@ -97,8 +102,8 @@ def get_dataset_name(paths:Union[List[str], str]) -> str:
     return '|'.join([filename[:filename.find('.')] for filename in filenames])
 
 
-def get_study_name(path_trainset:str, path_devset:str, model_name:str, pooling_mode:str, loss:str) -> str:
-    """Given the provided parameters return a string to identify the study."""
+def get_project_name(path_trainset:str, path_devset:str, model_name:str, pooling_mode:str, loss:str) -> str:
+    """Given the provided parameters return a string to identify the project."""
     return f"train[{get_dataset_name(path_trainset)}]eval[{get_dataset_name(path_devset)}]" + model_name.replace("/", "-") + f"[pooling-{pooling_mode}][loss-{'|'.join(loss)}]"
 
 
@@ -323,10 +328,12 @@ def train(model,
         model._save_checkpoint(checkpoint_path, checkpoint_save_total_limit, global_step)
 
 
-project_name = (project_name or get_study_name(path_trainset, path_devset, model_name, pooling_mode, loss))[:128]
+# Set up wandb
+project_name = (project_name or get_project_name(path_trainset, path_devset, model_name, pooling_mode, loss))[:128]
 wandb.init(
     project=project_name,
     config={
+        # TODO: add more (all the arguments that are important)
         "learning_rate": learning_rate,
         "loss": loss,
         "model": model_name,
@@ -342,6 +349,7 @@ wandb.init(
 wandb.define_metric("epoch")
 wandb.define_metric("epoch_score", step_metric="epoch")
 
+# Setting up the model
 transformer_seq_encoder = models.Transformer(model_name, max_seq_length=max_seq_length)
 
 if special_tokens:
@@ -352,11 +360,13 @@ sentence_vector = models.Pooling(transformer_seq_encoder.get_word_embedding_dime
 model = SentenceTransformer(modules=[transformer_seq_encoder, sentence_vector])
 wandb.watch(model, log_freq=WANDB_LOG_FREQ)
 
+# Loading datasets
+# Training sets
 logging.info(f"Reading training sets ({path_trainset})")
 train_objectives = []
 for ix, path in enumerate(path_trainset):
     loss_name = loss[:ix + 1][-1]
-    data = SimilarityDataReader.read_csv(path, col_sent0="sent1", col_sent1="sent2", col_label="value")
+    data = SimilarityDataReader.read_csv(path, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
 
     if loss_name == "softmax":
         data = SimilarityDataset(data)
@@ -364,7 +374,7 @@ for ix, path in enumerate(path_trainset):
                                      sentence_embedding_dimension=model.get_sentence_embedding_dimension(),
                                      num_labels=data.num_labels)
     elif loss_name == "multi-neg-ranking":
-        data = SimilarityDatasetContrastive(data, label_pos="entailment", label_neg="contradiction")
+        data = SimilarityDatasetContrastive(data, label_pos=loss_contrastive_label_pos, label_neg=loss_contrastive_label_neg)
         loss_fn = losses.MultipleNegativesRankingLoss(model=model)
     elif loss_name == "cosine-similarity":
         data = SimilarityDataset(data, is_regression=True, normalize_value=True)
@@ -383,12 +393,13 @@ for ix, path in enumerate(path_trainset):
 
     train_objectives.append((data_loader, loss_fn))
 
+# Evaluation/development set
 dev_evaluator = None
 if path_devset:
     logging.info(f"Reading development set ({path_devset})")
     if eval_metric == "coorelation-score":
         devset = SimilarityDataset(
-            SimilarityDataReader.read_csv(path_devset, col_sent0="sent1", col_sent1="sent2", col_label="value"),
+            SimilarityDataReader.read_csv(path_devset, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL),
             is_regression=True,
             normalize_value=True
         )
@@ -397,7 +408,7 @@ if path_devset:
         )
     elif eval_metric in ["accuracy", "f1-score", "recall", "precision"]:
         devset = SimilarityDataset(
-            SimilarityDataReader.read_csv(path_devset, col_sent0="sent1", col_sent1="sent2", col_label="value")
+            SimilarityDataReader.read_csv(path_devset, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
         )
         devset = DataLoader(devset, shuffle=False, batch_size=batch_size)
 
@@ -408,6 +419,7 @@ if path_devset:
     else:
         raise ValueError(f"evaluation metric '{eval_metric}' is not supported.")
 
+# Training
 steps_per_epoch = min([len(data_loader) for data_loader, _ in train_objectives])  # trainingsets will be repeated as in a round-robin queue, 1 epochs = full smallest dataset, increase epoch to cover more parts of the bigger ones
 warmup_steps = math.ceil(len(data) * num_epochs * warmup_pct)
 logging.info("Warmup steps: {}".format(warmup_steps))
@@ -428,7 +440,7 @@ train(model, train_objectives=train_objectives,
       callback=on_evaluation)
 
 
-# If evaluation on test set...
+# If test set, then evaluate on test set...
 if path_testset:
     logging.info(f"Loading best checkpoint from disk ({path_output})")
     model = SentenceTransformer(path_output)
@@ -439,7 +451,7 @@ if path_testset:
     logging.info(f"Reading the test set ({path_testset})")
     if eval_metric == "coorelation-score":
         testset = SimilarityDataset(
-            SimilarityDataReader.read_csv(path_testset, col_sent0="sent1", col_sent1="sent2", col_label="value"),
+            SimilarityDataReader.read_csv(path_testset, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL),
             is_regression=True,
             normalize_value=True
         )
@@ -448,7 +460,7 @@ if path_testset:
         )
     elif eval_metric in ["accuracy", "f1-score", "recall", "precision"]:
         testset = SimilarityDataset(
-            SimilarityDataReader.read_csv(path_testset, col_sent0="sent1", col_sent1="sent2", col_label="value")
+            SimilarityDataReader.read_csv(path_testset, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
         )
         testset = DataLoader(testset, shuffle=False, batch_size=batch_size)
 
