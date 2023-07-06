@@ -70,7 +70,7 @@ pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
 # path_testset = 'data/AllNLI_test.csv'
 loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # softmax, "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
 special_tokens = []  # ["[USR]", "[SYS]"]
-eval_metric = "coorelation"  # "coorelation"  (Spearman correlation) + sklearn classification_report metrics ("f1-score", "accuracy", "recall", "precision")
+eval_metric = "coorelation-score"  # "coorelation-score"  (Spearman correlation) + sklearn classification_report metrics ("f1-score", "accuracy", "recall", "precision")
 eval_metric_avg = "macro"  # "macro", "micro", "weighted" (ignore if not classification, )
 max_seq_length = None
 batch_size = 16
@@ -406,7 +406,7 @@ for ix, path in enumerate(path_trainset):
 dev_evaluator = None
 if path_devset:
     logging.info(f"Reading development set ({path_devset})")
-    if eval_metric == "coorelation":
+    if eval_metric == "coorelation-score":
         devset = SimilarityDataset(
             SimilarityDataReader.read_csv(path_devset, col_sent0="sent1", col_sent1="sent2", col_label="value"),
             is_regression=True,
@@ -457,7 +457,7 @@ if path_testset:
     model.to(model._target_device)
 
     logging.info(f"Reading the test set ({path_testset})")
-    if eval_metric == "coorelation":
+    if eval_metric == "coorelation-score":
         testset = SimilarityDataset(
             SimilarityDataReader.read_csv(path_testset, col_sent0="sent1", col_sent1="sent2", col_label="value"),
             is_regression=True,
