@@ -1,8 +1,8 @@
 from torch.utils.data import Dataset
 from sentence_transformers import InputExample
 
-from . import SimilarityDataReader
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
+
 
 class SimilarityDataset(Dataset):
     """
@@ -10,7 +10,7 @@ class SimilarityDataset(Dataset):
     """
     num_labels = 0
 
-    def __init__(self, data:Iterable, is_regression:bool=False, normalize_value:bool=True):
+    def __init__(self, data: Iterable, is_regression: bool = False, normalize_value: bool = True):
         """data:Iterable
         normalize_value: if regression whether or not to normalize returned values
         """
@@ -47,4 +47,3 @@ class SimilarityDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.samples[idx]
-

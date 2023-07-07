@@ -6,7 +6,6 @@ import logging
 from torch import nn
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from sklearn.metrics import classification_report
 from sentence_transformers.util import batch_to_device
 from sentence_transformers.evaluation import SentenceEvaluator
 
@@ -20,7 +19,7 @@ class LossEvaluator(SentenceEvaluator):
     The results are written in a CSV. If a CSV already exists, then values are appended.
     """
 
-    def __init__(self, dataloader:DataLoader, loss_model:nn.Module=None, name:str='', write_csv:bool=True, show_progress_bar:bool=True):
+    def __init__(self, dataloader: DataLoader, loss_model: nn.Module = None, name: str = '', write_csv: bool = True, show_progress_bar: bool = True):
         """
         Constructs an evaluator for the given dataset
 

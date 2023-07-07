@@ -9,6 +9,7 @@ PATH_DATASET_REGRESSION = "tests/data/dataset_regression.csv"
 
 random.seed(13)
 
+
 def test_dataset_raw():
     # Error cases
     with pytest.raises(KeyError):

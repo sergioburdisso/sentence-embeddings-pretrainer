@@ -1,18 +1,15 @@
-import csv
-import gzip
 import random
 
 from torch.utils.data import Dataset
 from sentence_transformers import InputExample
 
-from . import SimilarityDataReader
-from typing import Any, Union, Optional
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
+
 
 class SimilarityDatasetContrastive(Dataset):
     num_labels = 0
 
-    def __init__(self, data:Iterable, label_pos:str=None, label_neg:str=None):
+    def __init__(self, data: Iterable, label_pos: str = None, label_neg: str = None):
 
         only_positives = not label_pos or not label_neg  # if there's no labels, then we assume only possitive pairs are given
         valid_labels = [label_pos, label_neg]
@@ -62,6 +59,7 @@ class SimilarityDatasetContrastive(Dataset):
 
     def __getitem__(self, idx):
         return self.samples[idx]
+        # Tried lazy version on commented code blocks, but not so simple because __setitem__ is required...
         # o_idx = idx // 2
         # anchor_sent, pos_neg_lists = self._org_samples[o_idx]
 

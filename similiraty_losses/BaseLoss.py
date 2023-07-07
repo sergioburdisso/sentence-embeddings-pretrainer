@@ -1,7 +1,5 @@
-import torch
 from torch import nn, Tensor
-from typing import Union, Tuple, List, Iterable, Dict, Callable
-from sentence_transformers import SentenceTransformer
+from typing import Iterable, Dict
 import logging
 
 

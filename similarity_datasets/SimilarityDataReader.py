@@ -1,9 +1,10 @@
 import csv
 import gzip
+import json
 
 from pathlib import Path
-from typing import Any, Union, Optional
-from collections.abc import Iterable, Iterator
+from typing import Union, Optional
+from collections.abc import Iterator
 
 
 class SimilarityDataReader:
@@ -16,12 +17,12 @@ class SimilarityDataReader:
     @staticmethod
     def read_csv(
         path: str,
-        delimiter:str=",",
-        col_sent0:str="sent1", col_sent1:str="sent2",
-        col_label:Optional[str]="value",
-        col_split:str="split", use_split:Optional[str]=None,
-        label_optinal:bool=False, preprocess_fn:Optional[callable]=None,
-        encoding:str='utf8'
+        delimiter: str = ",",
+        col_sent0: str = "sent1", col_sent1: str = "sent2",
+        col_label: Optional[str] = "value",
+        col_split: str = "split", use_split: Optional[str] = None,
+        label_optinal: bool = False, preprocess_fn: Optional[callable] = None,
+        encoding: str = 'utf8'
     ) -> Iterator[tuple[str, str, Optional[Union[str, float]]]]:
         """
         Lazily read (sent1, sent1, value) values from a CSV files.
@@ -72,11 +73,11 @@ class SimilarityDataReader:
     @staticmethod
     def read_jsonl(
         path: str,
-        key_sent0:str="sent1", key_sent1:str="sent2",
-        key_label:Optional[str]="value",
-        key_split:str="split", use_split:Optional[str]=None,
-        label_optinal:bool=False, preprocess_fn:Optional[callable]=None,
-        encoding:str='utf8'
+        key_sent0: str = "sent1", key_sent1: str = "sent2",
+        key_label: Optional[str] = "value",
+        key_split: str = "split", use_split: Optional[str] = None,
+        label_optinal: bool = False, preprocess_fn: Optional[callable] = None,
+        encoding: str = 'utf8'
     ) -> Iterator[tuple[str, str, Optional[Union[str, float]]]]:
         """
         Lazily read in contents of jsonlist files.

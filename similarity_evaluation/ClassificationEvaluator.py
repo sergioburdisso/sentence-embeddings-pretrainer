@@ -20,9 +20,9 @@ class ClassificationEvaluator(SentenceEvaluator):
     The results are written in a CSV. If a CSV already exists, then values are appended.
     """
 
-    def __init__(self, dataloader:DataLoader, metric:str="accuracy", metric_avg:str="macro",
-                 name:str="", softmax_model:nn.Module=None,
-                 write_csv:bool=True, show_progress_bar:bool=True):
+    def __init__(self, dataloader: DataLoader, metric: str = "accuracy", metric_avg: str = "macro",
+                 name: str = "", softmax_model: nn.Module = None,
+                 write_csv: bool = True, show_progress_bar: bool = True):
         """
         Constructs an evaluator for the given dataset
 

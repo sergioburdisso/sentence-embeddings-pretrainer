@@ -37,7 +37,7 @@ checkpointing:
   path: "outputs/test/checkpoints"
 
 wandb:
-  project_name: null
+  project_name: null  # if null a defult name will be given using the provided parameters (traininset, model name, etc.)
   log_freq: 100
 
 datasets:

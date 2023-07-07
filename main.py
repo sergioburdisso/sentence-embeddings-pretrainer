@@ -13,11 +13,11 @@ import numpy as np
 
 from torch import nn
 from torch.optim import Optimizer
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from omegaconf import DictConfig
 from tqdm.autonotebook import trange
-from typing import Union, Optional, List, Iterable, Tuple, Type, Dict, Callable
+from typing import Union, List, Iterable, Tuple, Type, Dict
 
 from sentence_transformers import models, datasets
 from sentence_transformers import SentenceTransformer, LoggingHandler
@@ -27,7 +27,7 @@ from sentence_transformers.model_card_templates import ModelCardTemplate
 
 from similarity_evaluation import ClassificationEvaluator, LossEvaluator
 from similarity_datasets import SimilarityDataReader, SimilarityDataset, SimilarityDatasetContrastive
-from similiraty_losses import SoftmaxLoss, CosineSimilarityLoss, DenoisingAutoEncoderLoss, MultipleNegativesRankingLoss
+from similiraty_losses import BaseLoss, SoftmaxLoss, CosineSimilarityLoss, DenoisingAutoEncoderLoss, MultipleNegativesRankingLoss
 
 logging.basicConfig(format='%(asctime)s - %(message)s', datefmt=r'%Y-%m-%d %H:%M:%S',
                     level=logging.INFO, handlers=[LoggingHandler()])
@@ -42,12 +42,15 @@ CSV_COL_SENT2 = None
 CSV_COL_LABEL = None
 
 
-def get_loss_class_name(loss_name):
-    # Convert to UpperCamelCase
+def get_loss_class_name(loss_name: str) -> str:
+    """
+    Convert to original-name to UpperCamelCase class name.
+    TODO: :param NAME: description to this and all the functions below...
+    """
     return ''.join([w.capitalize() for w in loss_name.split('-')]) + "Loss"
 
 
-def get_dataset_name(paths:Union[List[str], str]) -> str:
+def get_dataset_name(paths: Union[List[str], str]) -> str:
     """Given a path, or a list of paths, return string with file name(s)."""
     if isinstance(paths, str):
         paths = [paths]
@@ -56,13 +59,14 @@ def get_dataset_name(paths:Union[List[str], str]) -> str:
     return '|'.join([filename[:filename.find('.')] for filename in filenames])
 
 
-def get_default_wandb_project_name(path_trainset:str, path_devset:str, model_name:str, pooling_mode:str, loss:str) -> str:
+def get_default_wandb_project_name(path_trainset: str, path_devset: str, model_name: str, pooling_mode: str, loss: str) -> str:
     """Given the provided parameters return a string to identify the project."""
     project_name = f"train[{get_dataset_name(path_trainset)}]eval[{get_dataset_name(path_devset)}]" + model_name.replace("/", "-") + f"[pooling-{pooling_mode}][loss-{'|'.join(loss)}]"
     return project_name[:128]  # wandb project name can't have more than 128 characters
 
 
-def get_dataset_by_loss(loss_name, data):
+def get_dataset_by_loss(loss_name: str, data: Iterable) -> Dataset:
+    """Get the proper Dataset object for the given loss."""
     if loss_name == SoftmaxLoss.__name__:
         return SimilarityDataset(data)
     elif loss_name == MultipleNegativesRankingLoss.__name__:
@@ -73,7 +77,9 @@ def get_dataset_by_loss(loss_name, data):
         return datasets.DenoisingAutoEncoderDataset(data)
 
 
-def get_dataloader_by_loss(loss_name, dataset, batch_size, shuffle=True):
+def get_dataloader_by_loss(loss_name: str, dataset: Dataset, batch_size: int, shuffle: bool = True) -> DataLoader:
+    """Get the proper DataLoader for the given loss."""
+    # If contrastive unsupervised...
     if loss_name == MultipleNegativesRankingLoss.__name__:
         # Make sure there are no duplicate instances in the batch
         return datasets.NoDuplicatesDataLoader(dataset, batch_size=batch_size)
@@ -81,7 +87,8 @@ def get_dataloader_by_loss(loss_name, dataset, batch_size, shuffle=True):
     return DataLoader(dataset, shuffle=shuffle, batch_size=batch_size, drop_last=True)
 
 
-def get_loss_by_name(loss_name, data, model):
+def get_loss_by_name(loss_name: str, data: Dataset, model: SentenceTransformer) -> BaseLoss:
+    """Get the Loss object given its name."""
     if loss_name == SoftmaxLoss.__name__:
         return SoftmaxLoss(model=model,
                            sentence_embedding_dimension=model.get_sentence_embedding_dimension(),
@@ -96,13 +103,19 @@ def get_loss_by_name(loss_name, data, model):
         raise ValueError(f"Loss {loss_name} not supported.")
 
 
-def get_evaluator_by_metric(path_evalset, metric, metric_avg="", loss_model=None, batch_size=None, evaluator_name=''):
-    # `loss_model` is only used when `metric` == 'loss'
+def get_evaluator_by_metric(path_evalset: str, metric: str, metric_avg: str = "",
+                            loss_model: BaseLoss = None, batch_size: int = None,
+                            evaluator_name: str = '') -> SentenceEvaluator:
+    """
+    Get the Evaluator object for the given metric name.
+
+    If `metric` == 'loss' then the `loss_model` should contain the concrete loss object to use for evaluation
+    """
 
     # if it's unsupervised
     if metric == "loss" and isinstance(loss_model, DenoisingAutoEncoderLoss):
         # read raw txt file, each line is a sample sentence
-        data =list(SimilarityDataReader.read_docs(path_evalset, lines_are_documents=True))
+        data = list(SimilarityDataReader.read_docs(path_evalset, lines_are_documents=True))
     else:
         data = SimilarityDataReader.read_csv(path_evalset, col_sent0=CSV_COL_SENT1, col_sent1=CSV_COL_SENT2, col_label=CSV_COL_LABEL)
 
@@ -127,28 +140,36 @@ def get_evaluator_by_metric(path_evalset, metric, metric_avg="", loss_model=None
         raise ValueError(f"evaluation metric '{metric}' is not supported.")
 
 
-def wandb_log(score:float, avg_losses:List[float], metric_name:str, epoch:int, steps:int) -> None:
+def wandb_log(score: float, avg_losses: List[float], metric_name: str, epoch: int, steps: int) -> None:
+    """
+    Log evaluation results in WandB.
+
+    When called after finishing each bach, `steps` will be equal to -1.
+    """
+
     # if it's the evaluation perform automatically **after finishing the epoch**, use "epoch" as x-axis
     if steps == -1:
         wandb.log({f"{metric_name}_epoch": score, "epoch": epoch + 1})
     else:  # if not just use default wandb steps as x-axis
         metrics = {metric_name: score}
         if len(avg_losses) > 1:
-            metrics.update({f"train_loss_obj{ix}" : avg_loss for ix, avg_loss in enumerate(avg_losses)})
+            metrics.update({f"train_loss_obj{ix}": avg_loss for ix, avg_loss in enumerate(avg_losses)})
         elif len(avg_losses) == 1:
-            metrics.update({"train_loss" : avg_losses[0]})
+            metrics.update({"train_loss": avg_losses[0]})
         wandb.log(metrics)
 
 
-def eval_during_training(model, evaluator, output_path, save_best_model, epoch, steps, loss_values):
-    """Runs evaluation during the training."""
+def eval_during_training(model: SentenceTransformer, evaluator: SentenceEvaluator,
+                         output_path: str, save_best_model: bool, epoch: int, steps: int,
+                         loss_values: list) -> None:
+    """Runs evaluation during the training using the provided evalutor object."""
     eval_path = output_path
     if output_path is not None:
         os.makedirs(output_path, exist_ok=True)
         eval_path = os.path.join(output_path, "eval")
         os.makedirs(eval_path, exist_ok=True)
 
-    # average loss per objective/task
+    # average loss per objective/task since the last evaluation/call
     avg_losses = [sum(ll) / float(len(ll)) if len(ll) else 0 for ll in loss_values]
 
     if evaluator is not None:
@@ -162,29 +183,33 @@ def eval_during_training(model, evaluator, output_path, save_best_model, epoch, 
         wandb_log(None, avg_losses, evaluator.metric_name, epoch, steps)
 
 
-def train(model,
-          train_objectives: Iterable[Tuple[DataLoader, nn.Module]],
-          evaluator: SentenceEvaluator = None,
-          epochs: int = 1,
-          steps_per_epoch = None,
-          scheduler: str = 'WarmupLinear',
-          warmup_steps: int = 10000,
-          optimizer_class: Type[Optimizer] = torch.optim.AdamW,
-          optimizer_params : Dict[str, object]= {'lr': 2e-5},
-          weight_decay: float = 0.01,
-          evaluation_steps: int = 0,
-          output_path: str = None,
-          save_best_model: bool = True,
-          max_grad_norm: float = 1,
-          use_amp: bool = False,
-          show_progress_bar: bool = True,
-          checkpoint_path: str = None,
-          checkpoint_save_steps: int = 500,
-          checkpoint_save_total_limit: int = 0,
-          checkpoint_save_after_each_epoch: bool = False,
-        ):
+# Modified from the original sentence-bert model.fit() implementation
+# (https://github.com/UKPLab/sentence-transformers/blob/master/sentence_transformers/SentenceTransformer.py#L575)
+def train(
+        model,
+        train_objectives: Iterable[Tuple[DataLoader, nn.Module]],
+        evaluator: SentenceEvaluator = None,
+        epochs: int = 1,
+        steps_per_epoch: int = None,
+        scheduler: str = 'WarmupLinear',
+        warmup_steps: int = 10000,
+        optimizer_class: Type[Optimizer] = torch.optim.AdamW,
+        optimizer_params: Dict[str, object] = {'lr': 2e-5},
+        weight_decay: float = 0.01,
+        evaluation_steps: int = 0,
+        output_path: str = None,
+        save_best_model: bool = True,
+        max_grad_norm: float = 1,
+        use_amp: bool = False,
+        show_progress_bar: bool = True,
+        checkpoint_path: str = None,
+        checkpoint_save_steps: int = 500,
+        checkpoint_save_total_limit: int = 0,
+        checkpoint_save_after_each_epoch: bool = False,
+):
     """
-    Train the model with the given training objective(s)
+    Train the model with the given training objective(s).
+
     Each training objective is sampled in turn for one batch.
     We sample only as many batches from each objective as there are in the smallest one
     to make sure of equal training with each dataset.
@@ -208,13 +233,15 @@ def train(model,
     :param checkpoint_save_steps: Will save a checkpoint after so many steps
     :param checkpoint_save_total_limit: Total number of checkpoints to store
     """
-
-    info_loss_functions =  []
+    info_loss_functions = []
     for dataloader, loss in train_objectives:
         info_loss_functions.extend(ModelCardTemplate.get_train_objective_info(dataloader, loss))
     info_loss_functions = "\n\n".join([text for text in info_loss_functions])
 
-    info_fit_parameters = json.dumps({"evaluator": fullname(evaluator), "epochs": epochs, "steps_per_epoch": steps_per_epoch, "scheduler": scheduler, "warmup_steps": warmup_steps, "optimizer_class": str(optimizer_class),  "optimizer_params": optimizer_params, "weight_decay": weight_decay, "evaluation_steps": evaluation_steps, "max_grad_norm": max_grad_norm }, indent=4, sort_keys=True)
+    info_fit_parameters = json.dumps({"evaluator": fullname(evaluator), "epochs": epochs, "steps_per_epoch": steps_per_epoch,
+                                      "scheduler": scheduler, "warmup_steps": warmup_steps, "optimizer_class": str(optimizer_class),
+                                      "optimizer_params": optimizer_params, "weight_decay": weight_decay, "evaluation_steps": evaluation_steps,
+                                      "max_grad_norm": max_grad_norm}, indent=4, sort_keys=True)
     model._model_card_text = None
     model._model_card_vars['{TRAINING_SECTION}'] = ModelCardTemplate.__TRAINING_SECTION__.replace("{LOSS_FUNCTIONS}", info_loss_functions).replace("{FIT_PARAMETERS}", info_fit_parameters)
 
@@ -234,7 +261,7 @@ def train(model,
     for loss_model in loss_models:
         loss_model.to(model._target_device)
 
-    model.best_score = -9999999
+    model.best_score = float("-inf")
 
     if steps_per_epoch is None or steps_per_epoch == 0:
         steps_per_epoch = min([len(dataloader) for dataloader in dataloaders])
@@ -344,7 +371,7 @@ def train(model,
 
 
 @hydra.main(version_base=None, config_path=".", config_name="config")
-def main(cfg:DictConfig) -> None:
+def main(cfg: DictConfig) -> None:
     global CONTRASTIVE_LABEL_POS, CONTRASTIVE_LABEL_NEG, CSV_COL_SENT1, CSV_COL_SENT2, CSV_COL_LABEL
 
     CONTRASTIVE_LABEL_POS = cfg.contrastive_learning.label_pos
@@ -374,13 +401,13 @@ def main(cfg:DictConfig) -> None:
     if not cfg.evaluation.testset:
         cfg.evaluation.testset = ''
 
-    # Set up wandb
+    # 1. Set up wandb
     project_name = (cfg.wandb.project_name or get_default_wandb_project_name(cfg.target.trainsets, cfg.evaluation.devset,
                                                                              cfg.model.base, cfg.model.pooling_mode, cfg.target.losses))
     wandb.init(
         project=project_name,
         config={
-            # TODO: add more (all the arguments that are important)
+            # TODO: add more (all we consider important to be added)
             "learning_rate": learning_rate,
             "loss": cfg.target.losses,
             "model": cfg.model.base,
@@ -396,7 +423,7 @@ def main(cfg:DictConfig) -> None:
     wandb.define_metric("epoch")
     wandb.define_metric("epoch_score", step_metric="epoch")
 
-    # Set up the model
+    # 2. Set up the model
     transformer_seq_encoder = models.Transformer(cfg.model.base, max_seq_length=cfg.model.max_seq_length)
 
     if cfg.model.special_tokens:
@@ -407,18 +434,18 @@ def main(cfg:DictConfig) -> None:
     model = SentenceTransformer(modules=[transformer_seq_encoder, sentence_vector])
     wandb.watch(model, log_freq=cfg.wandb.log_freq)
 
-    # Loading datasets, data loaders and losses
-    # Training sets
+    # 3. Loading datasets, data loaders and losses
+    # 3.1. Training sets
     logging.info(f"Reading training sets ({cfg.target.trainsets})")
     train_objectives = []
     target_losses = [get_loss_class_name(loss_name) for loss_name in cfg.target.losses]
     for ix, path in enumerate(cfg.target.trainsets):
-        loss_name = target_losses[:ix + 1][-1]  # trick to return last one if there are more datasets than losses
+        loss_name = target_losses[:ix + 1][-1]  # trick to avoid IndexError when there are more datasets than losses by returning the last one
 
         # if it's unsupervised
         if loss_name == DenoisingAutoEncoderLoss.__name__:
             # read raw txt file, each line is a sample sentence
-            data =list(SimilarityDataReader.read_docs(path, lines_are_documents=True))
+            data = list(SimilarityDataReader.read_docs(path, lines_are_documents=True))
         else:
             data = SimilarityDataReader.read_csv(path, col_sent0=CSV_COL_SENT1, col_sent1=CSV_COL_SENT2, col_label=CSV_COL_LABEL)
 
@@ -428,17 +455,17 @@ def main(cfg:DictConfig) -> None:
         train_objectives.append((get_dataloader_by_loss(loss_name, data, batch_size=batch_size), loss_fn))
 
     # Assuming here the first loss at [0] is the one is used
-    # For evaluation, should be somehow allow the user to specify it?
+    # For evaluation, should be somehow allow the user to specify a different one?
     _, evaluation_loss = train_objectives[0]
 
-    # Evaluation/development set
+    # 3.2. Evaluation/development set
     dev_evaluator = None
     if cfg.evaluation.devset:
         logging.info(f"Reading development set ({cfg.evaluation.devset})")
         dev_evaluator = get_evaluator_by_metric(cfg.evaluation.devset, cfg.evaluation.metric, cfg.evaluation.metric_avg, evaluation_loss, batch_size=batch_size, evaluator_name="devset")
         dev_evaluator.metric_name = cfg.evaluation.metric
 
-    # Training
+    # 4. Training
     steps_per_epoch = min([len(data_loader) for data_loader, _ in train_objectives])  # if multiple trainingsets, sets will be repeated as in a round-robin queue, 1 epochs = full smallest dataset, increase epoch to cover more parts of the bigger ones
     warmup_steps = math.ceil(steps_per_epoch * num_epochs * warmup_pct)
     logging.info("Warmup steps: {}".format(warmup_steps))
@@ -458,7 +485,7 @@ def main(cfg:DictConfig) -> None:
           checkpoint_save_total_limit=cfg.checkpointing.total_limit,
           checkpoint_save_after_each_epoch=cfg.checkpointing.always_save_after_each_epoch)
 
-    # If test set, then evaluate on test set...
+    # 5. If test set, then evaluate model on it...
     if cfg.evaluation.testset:
         logging.info(f"Loading final model from disk ({cfg.evaluation.best_model_output_path})")
         model = SentenceTransformer(cfg.evaluation.best_model_output_path)
@@ -469,7 +496,7 @@ def main(cfg:DictConfig) -> None:
         logging.info(f"Reading the test set ({cfg.evaluation.testset})")
         test_evaluator = get_evaluator_by_metric(cfg.evaluation.testset, cfg.evaluation.metric, cfg.evaluation.metric_avg, evaluation_loss, batch_size=batch_size, evaluator_name="testset")
 
-        logging.info(f"Evaluating model on the test set data...")
+        logging.info("Evaluating model on the test set data...")
         test_evaluator(model, output_path=cfg.evaluation.best_model_output_path)
 
 
