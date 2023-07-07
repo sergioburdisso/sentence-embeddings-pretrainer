@@ -32,7 +32,6 @@ class CosineSimilarityLoss(BaseLoss):
 
 
     """
-
     def __init__(self, model: SentenceTransformer, loss_fct = nn.MSELoss(), cos_score_transformation=nn.Identity()):
         super(CosineSimilarityLoss, self).__init__()
         self.model = model

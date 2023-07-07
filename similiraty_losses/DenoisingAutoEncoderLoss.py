@@ -24,7 +24,6 @@ class DenoisingAutoEncoderLoss(BaseLoss):
         Only when the encoder and decoder are from the same architecture, can the flag 'tie_encoder_decoder' works.
         For more information, please refer to the TSDAE paper.
     """
-
     def __init__(
             self,
             model: SentenceTransformer,

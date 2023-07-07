@@ -1,28 +1,25 @@
 """
 Script to pre-train sentence-BERT-like models for task-oriented dialogue.
-
-Usage: python main.py .... [TODO]
 """
 import os
-import sys
 import json
 import math
 import torch
 import wandb
+import hydra
 import random
 import logging
-import argparse
 import numpy as np
-
-from datetime import datetime
 
 from torch import nn
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
+from omegaconf import DictConfig
 from tqdm.autonotebook import trange
 from typing import Union, Optional, List, Iterable, Tuple, Type, Dict, Callable
-from sentence_transformers import models, losses, datasets
+
+from sentence_transformers import models, datasets
 from sentence_transformers import SentenceTransformer, LoggingHandler
 from sentence_transformers.util import fullname, batch_to_device
 from sentence_transformers.evaluation import SentenceEvaluator, SimilarityFunction, EmbeddingSimilarityEvaluator
@@ -30,72 +27,24 @@ from sentence_transformers.model_card_templates import ModelCardTemplate
 
 from similarity_evaluation import ClassificationEvaluator, LossEvaluator
 from similarity_datasets import SimilarityDataReader, SimilarityDataset, SimilarityDatasetContrastive
-from similiraty_losses import SoftmaxLoss, CosineSimilarityLoss, DenoisingAutoEncoderLoss, MultipleNegativesRankingLoss, NAME2LOSS_MAP
+from similiraty_losses import SoftmaxLoss, CosineSimilarityLoss, DenoisingAutoEncoderLoss, MultipleNegativesRankingLoss
+
+logging.basicConfig(format='%(asctime)s - %(message)s', datefmt=r'%Y-%m-%d %H:%M:%S',
+                    level=logging.INFO, handlers=[LoggingHandler()])
+
+DEFAULT_OPTIMIZER = torch.optim.AdamW
+
+# Globals to be populated in main()
+CONTRASTIVE_LABEL_POS = None
+CONTRASTIVE_LABEL_NEG = None
+CSV_COL_SENT1 = None
+CSV_COL_SENT2 = None
+CSV_COL_LABEL = None
 
 
-# TODO: use config file instead for below
-DEFAULT_SEED = 13
-DEFAULT_NAME_COL_SENT1 = "sent1"
-DEFAULT_NAME_COL_SENT2 = "sent2"
-DEFAULT_NAME_COL_LABEL = "value"
-MIN_EVALUATION_STEPS = 100
-MIN_CHECKPOINT_SAVE_STEPS = 50
-WANDB_LOG_FREQ = 100
-
-logging.basicConfig(format='%(asctime)s - %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S',
-                    level=logging.INFO,
-                    handlers=[LoggingHandler()])
-
-
-# TODO: use argparse.ArgumentParser() or Hydra for below!!!
-model_name = sys.argv[1] if len(sys.argv) > 1 else 'bert-base-uncased'
-pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
-# loss = "softmax"
-# eval_metric = "f1-score"
-# path_trainset = 'data/AllNLI_train.csv'
-# path_devset = 'data/AllNLI_dev.csv'
-# path_testset = 'data/AllNLI_test.csv'
-
-loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # "softmax", "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
-loss_contrastive_label_pos="entailment"
-loss_contrastive_label_neg="contradiction"
-special_tokens = []  # ["[USR]", "[SYS]"]
-eval_metric = "loss"  # "coorelation-score"  (Spearman correlation) + sklearn classification_report metrics ("f1-score", "accuracy", "recall", "precision")
-# eval_metric = "coorelation-score"  # "coorelation-score"  (Spearman correlation) + sklearn classification_report metrics ("f1-score", "accuracy", "recall", "precision")
-eval_metric_avg = "macro"  # "macro", "micro", "weighted" (ignore if not classification, )
-max_seq_length = None
-batch_size = 16
-num_epochs = 2
-evals_per_epoch = 50
-warmup_pct = 0.1
-learning_rate = 2e-5
-log_interval = 100
-optimizer = torch.optim.AdamW
-path_trainset = ["data/dialogue.txt", "data/AllNLI_train.csv", "data/stsbenchmark_train.csv"]
-path_devset = "data/dialogue_eval.txt"
-path_testset = "data/dialogue_eval.txt"
-# path_devset = "data/stsbenchmark_dev.csv"
-# path_testset = "data/stsbenchmark_test.csv"
-path_output = "output/test"
-checkpoint_path = "output/test/checkpoints"
-checkpoint_saves_per_epoch = 0
-checkpoint_save_total_limit = 0
-checkpoint_save_after_each_epoch = True
-project_name = None
-
-torch.manual_seed(DEFAULT_SEED)
-np.random.seed(DEFAULT_SEED)
-random.seed(DEFAULT_SEED)
-
-if isinstance(path_trainset, str):
-    path_trainset = [path_trainset]
-if isinstance(loss, str):
-    loss = [loss]
-if not path_devset:
-    path_devset = ''
-if not path_testset:
-    path_testset = ''
+def get_loss_class_name(loss_name):
+    # Convert to UpperCamelCase
+    return ''.join([w.capitalize() for w in loss_name.split('-')]) + "Loss"
 
 
 def get_dataset_name(paths:Union[List[str], str]) -> str:
@@ -107,56 +56,55 @@ def get_dataset_name(paths:Union[List[str], str]) -> str:
     return '|'.join([filename[:filename.find('.')] for filename in filenames])
 
 
-def get_project_name(path_trainset:str, path_devset:str, model_name:str, pooling_mode:str, loss:str) -> str:
+def get_default_wandb_project_name(path_trainset:str, path_devset:str, model_name:str, pooling_mode:str, loss:str) -> str:
     """Given the provided parameters return a string to identify the project."""
-    return f"train[{get_dataset_name(path_trainset)}]eval[{get_dataset_name(path_devset)}]" + model_name.replace("/", "-") + f"[pooling-{pooling_mode}][loss-{'|'.join(loss)}]"
+    project_name = f"train[{get_dataset_name(path_trainset)}]eval[{get_dataset_name(path_devset)}]" + model_name.replace("/", "-") + f"[pooling-{pooling_mode}][loss-{'|'.join(loss)}]"
+    return project_name[:128]  # wandb project name can't have more than 128 characters
 
 
 def get_dataset_by_loss(loss_name, data):
-    if loss_name == "softmax":
+    if loss_name == SoftmaxLoss.__name__:
         return SimilarityDataset(data)
-    elif loss_name == "multi-neg-ranking":
-        return SimilarityDatasetContrastive(data, label_pos=loss_contrastive_label_pos, label_neg=loss_contrastive_label_neg)
-    elif loss_name == "cosine-similarity":
+    elif loss_name == MultipleNegativesRankingLoss.__name__:
+        return SimilarityDatasetContrastive(data, label_pos=CONTRASTIVE_LABEL_POS, label_neg=CONTRASTIVE_LABEL_NEG)
+    elif loss_name == CosineSimilarityLoss.__name__:
         return SimilarityDataset(data, is_regression=True, normalize_value=True)
-    elif loss_name == "denoising-autoencoder":  # unsupervised
+    elif loss_name == DenoisingAutoEncoderLoss.__name__:  # unsupervised
         return datasets.DenoisingAutoEncoderDataset(data)
 
 
-def get_dataloader_by_loss(loss_name, dataset, shuffle=True):
-    if loss_name == "multi-neg-ranking":
+def get_dataloader_by_loss(loss_name, dataset, batch_size, shuffle=True):
+    if loss_name == MultipleNegativesRankingLoss.__name__:
+        # Make sure there are no duplicate instances in the batch
         return datasets.NoDuplicatesDataLoader(dataset, batch_size=batch_size)
 
     return DataLoader(dataset, shuffle=shuffle, batch_size=batch_size, drop_last=True)
 
 
-def get_loss_by_name(loss_name, data):
-    if loss_name not in NAME2LOSS_MAP:
-        raise ValueError(f"Loss {loss_name} not supported.")
-
-    if loss_name == "softmax":
+def get_loss_by_name(loss_name, data, model):
+    if loss_name == SoftmaxLoss.__name__:
         return SoftmaxLoss(model=model,
                            sentence_embedding_dimension=model.get_sentence_embedding_dimension(),
                            num_labels=data.num_labels)
-    elif loss_name == "multi-neg-ranking":
+    elif loss_name == MultipleNegativesRankingLoss.__name__:
         return MultipleNegativesRankingLoss(model=model)
-    elif loss_name == "cosine-similarity":
+    elif loss_name == CosineSimilarityLoss.__name__:
         return CosineSimilarityLoss(model=model)
-    elif loss_name == "denoising-autoencoder":  # unsupervised
+    elif loss_name == DenoisingAutoEncoderLoss.__name__:  # unsupervised
         return DenoisingAutoEncoderLoss(model, tie_encoder_decoder=True)
+    else:
+        raise ValueError(f"Loss {loss_name} not supported.")
 
 
-def get_evaluator_by_metric(path_evalset, metric, evaluator_name):
-    # assumming the first loss is the used (TODO: specify other loss, not only at [0])
-    loss_ix = 0
-    loss_name = loss[loss_ix]
+def get_evaluator_by_metric(path_evalset, metric, metric_avg="", loss_model=None, batch_size=None, evaluator_name=''):
+    # `loss_model` is only used when `metric` == 'loss'
 
     # if it's unsupervised
-    if metric == "loss" and loss_name == "denoising-autoencoder":
+    if metric == "loss" and isinstance(loss_model, DenoisingAutoEncoderLoss):
         # read raw txt file, each line is a sample sentence
         data =list(SimilarityDataReader.read_docs(path_evalset, lines_are_documents=True))
     else:
-        data = SimilarityDataReader.read_csv(path_evalset, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
+        data = SimilarityDataReader.read_csv(path_evalset, col_sent0=CSV_COL_SENT1, col_sent1=CSV_COL_SENT2, col_label=CSV_COL_LABEL)
 
     if metric == "coorelation-score":
         evalset = SimilarityDataset(data, is_regression=True, normalize_value=True)
@@ -166,27 +114,25 @@ def get_evaluator_by_metric(path_evalset, metric, evaluator_name):
         )
     elif metric in ["accuracy", "f1-score", "recall", "precision"]:
         evalset = DataLoader(SimilarityDataset(data), shuffle=False, batch_size=batch_size)
-
-        _, softmax_loss = train_objectives[loss_ix]
-        return ClassificationEvaluator(evalset, softmax_model=softmax_loss,
-                                       metric=metric, metric_avg=eval_metric_avg,
+        return ClassificationEvaluator(evalset, softmax_model=loss_model,
+                                       metric=metric, metric_avg=metric_avg,
                                        name=evaluator_name)
     elif metric == "loss":
-        _, target_loss = train_objectives[loss_ix]
+        loss_name = loss_model.__name__
         evalset = get_dataloader_by_loss(loss_name,
                                          get_dataset_by_loss(loss_name, data),
-                                         shuffle=False)
-        return LossEvaluator(evalset, target_loss, name=evaluator_name)
+                                         batch_size=batch_size, shuffle=False)
+        return LossEvaluator(evalset, loss_model, name=evaluator_name)
     else:
         raise ValueError(f"evaluation metric '{metric}' is not supported.")
 
 
-def on_evaluation(score:float, avg_losses:List[float], epoch:int, steps:int) -> None:
-    # if it's the evaluation perform automatically after finishing the epoch, use "custom epoch" step
+def wandb_log(score:float, avg_losses:List[float], metric_name:str, epoch:int, steps:int) -> None:
+    # if it's the evaluation perform automatically **after finishing the epoch**, use "epoch" as x-axis
     if steps == -1:
-        wandb.log({f"{eval_metric}_epoch": score, "epoch": epoch + 1})
-    else:  # if not just use default wandb steps
-        metrics = {eval_metric: score}
+        wandb.log({f"{metric_name}_epoch": score, "epoch": epoch + 1})
+    else:  # if not just use default wandb steps as x-axis
+        metrics = {metric_name: score}
         if len(avg_losses) > 1:
             metrics.update({f"train_loss_obj{ix}" : avg_loss for ix, avg_loss in enumerate(avg_losses)})
         elif len(avg_losses) == 1:
@@ -194,8 +140,8 @@ def on_evaluation(score:float, avg_losses:List[float], epoch:int, steps:int) -> 
         wandb.log(metrics)
 
 
-def eval_during_training(model, evaluator, output_path, save_best_model, epoch, steps, loss_values, callback):
-    """Runs evaluation during the training"""
+def eval_during_training(model, evaluator, output_path, save_best_model, epoch, steps, loss_values):
+    """Runs evaluation during the training."""
     eval_path = output_path
     if output_path is not None:
         os.makedirs(output_path, exist_ok=True)
@@ -207,15 +153,13 @@ def eval_during_training(model, evaluator, output_path, save_best_model, epoch, 
 
     if evaluator is not None:
         score = evaluator(model, output_path=eval_path, epoch=epoch, steps=steps)
-        if callback is not None:
-            callback(score, avg_losses, epoch, steps)
-        if eval_metric != "loss" and score > model.best_score:
+        wandb_log(score, avg_losses, evaluator.metric_name, epoch, steps)
+        if evaluator.metric_name != "loss" and score > model.best_score:
             model.best_score = score
             if save_best_model:
                 model.save(output_path)
     else:
-        if callback is not None:
-            callback(None, avg_losses, epoch, steps)
+        wandb_log(None, avg_losses, evaluator.metric_name, epoch, steps)
 
 
 def train(model,
@@ -233,7 +177,6 @@ def train(model,
           save_best_model: bool = True,
           max_grad_norm: float = 1,
           use_amp: bool = False,
-          callback: Callable[[float, int, int], None] = None,
           show_progress_bar: bool = True,
           checkpoint_path: str = None,
           checkpoint_save_steps: int = 500,
@@ -241,7 +184,7 @@ def train(model,
           checkpoint_save_after_each_epoch: bool = False,
         ):
     """
-    Train the model with the given training objective
+    Train the model with the given training objective(s)
     Each training objective is sampled in turn for one batch.
     We sample only as many batches from each objective as there are in the smallest one
     to make sure of equal training with each dataset.
@@ -260,9 +203,6 @@ def train(model,
     :param save_best_model: If true, the best model (according to evaluator) is stored at output_path
     :param max_grad_norm: Used for gradient normalization.
     :param use_amp: Use Automatic Mixed Precision (AMP). Only for Pytorch >= 1.6.0
-    :param callback: Callback function that is invoked after each evaluation.
-            It must accept the following three parameters in this order:
-            `score`, `epoch`, `steps`
     :param show_progress_bar: If True, output a tqdm progress bar
     :param checkpoint_path: Folder to save checkpoints during training
     :param checkpoint_save_steps: Will save a checkpoint after so many steps
@@ -380,7 +320,7 @@ def train(model,
             global_step += 1
 
             if evaluation_steps > 0 and training_steps % evaluation_steps == 0:
-                eval_during_training(model, evaluator, output_path, save_best_model, epoch, training_steps, loss_value_lists, callback)
+                eval_during_training(model, evaluator, output_path, save_best_model, epoch, training_steps, loss_value_lists)
 
                 for ix, loss_model in enumerate(loss_models):
                     loss_model.zero_grad()
@@ -394,104 +334,144 @@ def train(model,
         if checkpoint_save_after_each_epoch:
             model._save_checkpoint(checkpoint_path, None, f"epoch-{epoch}")
 
-        eval_during_training(model, evaluator, output_path, save_best_model, epoch, -1, loss_value_lists, callback)
+        eval_during_training(model, evaluator, output_path, save_best_model, epoch, -1, loss_value_lists)
 
-    if (evaluator is None or eval_metric == "loss") and output_path is not None:
+    if (evaluator is None or evaluator.metric_name == "loss") and output_path is not None:
         model.save(output_path)
 
     if checkpoint_path is not None:
         model._save_checkpoint(checkpoint_path, checkpoint_save_total_limit, global_step)
 
 
-# Set up wandb
-project_name = (project_name or get_project_name(path_trainset, path_devset, model_name, pooling_mode, loss))[:128]
-wandb.init(
-    project=project_name,
-    config={
-        # TODO: add more (all the arguments that are important)
-        "learning_rate": learning_rate,
-        "loss": loss,
-        "model": model_name,
-        "pooling_mode": pooling_mode,
-        "trainset": path_trainset,
-        "devset": path_devset,
-        "warmup_data_percentage": warmup_pct,
-        "epochs": num_epochs,
-        "batch_size": batch_size,
-        "optimizer": str(optimizer)
-    }
-)
-wandb.define_metric("epoch")
-wandb.define_metric("epoch_score", step_metric="epoch")
+@hydra.main(version_base=None, config_path=".", config_name="config")
+def main(cfg:DictConfig) -> None:
+    global CONTRASTIVE_LABEL_POS, CONTRASTIVE_LABEL_NEG, CSV_COL_SENT1, CSV_COL_SENT2, CSV_COL_LABEL
 
-# Set up the model
-transformer_seq_encoder = models.Transformer(model_name, max_seq_length=max_seq_length)
+    CONTRASTIVE_LABEL_POS = cfg.contrastive_learning.label_pos
+    CONTRASTIVE_LABEL_NEG = cfg.contrastive_learning.label_neg
+    CSV_COL_SENT1 = cfg.datasets.csv.column_name_sent1
+    CSV_COL_SENT2 = cfg.datasets.csv.column_name_sent2
+    CSV_COL_LABEL = cfg.datasets.csv.column_name_ground_truth
 
-if special_tokens:
-    transformer_seq_encoder.tokenizer.add_tokens(special_tokens, special_tokens=True)
-    transformer_seq_encoder.auto_model.resize_token_embeddings(len(transformer_seq_encoder.tokenizer))
+    num_epochs = cfg.training.num_epochs
+    batch_size = cfg.training.batch_size
+    warmup_pct = cfg.training.warmup_pct
+    learning_rate = cfg.training.learning_rate
+    evals_per_epoch = cfg.evaluation.evaluations_per_epoch
+    checkpoint_saves_per_epoch = cfg.checkpointing.saves_per_epoch
+    optimizer = DEFAULT_OPTIMIZER
 
-sentence_vector = models.Pooling(transformer_seq_encoder.get_word_embedding_dimension(), pooling_mode=pooling_mode)
-model = SentenceTransformer(modules=[transformer_seq_encoder, sentence_vector])
-wandb.watch(model, log_freq=WANDB_LOG_FREQ)
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    random.seed(cfg.seed)
 
-# Loading datasets, data loaders and losses
-# Training sets
-logging.info(f"Reading training sets ({path_trainset})")
-train_objectives = []
-for ix, path in enumerate(path_trainset):
-    loss_name = loss[:ix + 1][-1]
+    if isinstance(cfg.target.trainsets, str):
+        cfg.target.trainsets = [cfg.target.trainsets]
+    if isinstance(cfg.target.losses, str):
+        cfg.target.losses = [cfg.target.losses]
+    if not cfg.evaluation.devset:
+        cfg.evaluation.devset = ''
+    if not cfg.evaluation.testset:
+        cfg.evaluation.testset = ''
 
-    # if it's unsupervised
-    if loss_name == "denoising-autoencoder":
-        # read raw txt file, each line is a sample sentence
-        data =list(SimilarityDataReader.read_docs(path, lines_are_documents=True))
-    else:
-        data = SimilarityDataReader.read_csv(path, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
+    # Set up wandb
+    project_name = (cfg.wandb.project_name or get_default_wandb_project_name(cfg.target.trainsets, cfg.evaluation.devset,
+                                                                             cfg.model.base, cfg.model.pooling_mode, cfg.target.losses))
+    wandb.init(
+        project=project_name,
+        config={
+            # TODO: add more (all the arguments that are important)
+            "learning_rate": learning_rate,
+            "loss": cfg.target.losses,
+            "model": cfg.model.base,
+            "pooling_mode": cfg.model.pooling_mode,
+            "trainset": cfg.target.trainsets,
+            "devset": cfg.evaluation.devset,
+            "warmup_data_percentage": warmup_pct,
+            "epochs": num_epochs,
+            "batch_size": batch_size,
+            "optimizer": str(optimizer)
+        }
+    )
+    wandb.define_metric("epoch")
+    wandb.define_metric("epoch_score", step_metric="epoch")
 
-    data = get_dataset_by_loss(loss_name, data)
-    loss_fn = get_loss_by_name(loss_name, data)
+    # Set up the model
+    transformer_seq_encoder = models.Transformer(cfg.model.base, max_seq_length=cfg.model.max_seq_length)
 
-    train_objectives.append((get_dataloader_by_loss(loss_name, data), loss_fn))
+    if cfg.model.special_tokens:
+        transformer_seq_encoder.tokenizer.add_tokens(cfg.model.special_tokens, special_tokens=True)
+        transformer_seq_encoder.auto_model.resize_token_embeddings(len(transformer_seq_encoder.tokenizer))
+
+    sentence_vector = models.Pooling(transformer_seq_encoder.get_word_embedding_dimension(), pooling_mode=cfg.model.pooling_mode)
+    model = SentenceTransformer(modules=[transformer_seq_encoder, sentence_vector])
+    wandb.watch(model, log_freq=cfg.wandb.log_freq)
+
+    # Loading datasets, data loaders and losses
+    # Training sets
+    logging.info(f"Reading training sets ({cfg.target.trainsets})")
+    train_objectives = []
+    target_losses = [get_loss_class_name(loss_name) for loss_name in cfg.target.losses]
+    for ix, path in enumerate(cfg.target.trainsets):
+        loss_name = target_losses[:ix + 1][-1]  # trick to return last one if there are more datasets than losses
+
+        # if it's unsupervised
+        if loss_name == DenoisingAutoEncoderLoss.__name__:
+            # read raw txt file, each line is a sample sentence
+            data =list(SimilarityDataReader.read_docs(path, lines_are_documents=True))
+        else:
+            data = SimilarityDataReader.read_csv(path, col_sent0=CSV_COL_SENT1, col_sent1=CSV_COL_SENT2, col_label=CSV_COL_LABEL)
+
+        data = get_dataset_by_loss(loss_name, data)
+        loss_fn = get_loss_by_name(loss_name, data, model)
+
+        train_objectives.append((get_dataloader_by_loss(loss_name, data, batch_size=batch_size), loss_fn))
+
+    # Assuming here the first loss at [0] is the one is used
+    # For evaluation, should be somehow allow the user to specify it?
+    _, evaluation_loss = train_objectives[0]
+
+    # Evaluation/development set
+    dev_evaluator = None
+    if cfg.evaluation.devset:
+        logging.info(f"Reading development set ({cfg.evaluation.devset})")
+        dev_evaluator = get_evaluator_by_metric(cfg.evaluation.devset, cfg.evaluation.metric, cfg.evaluation.metric_avg, evaluation_loss, batch_size=batch_size, evaluator_name="devset")
+        dev_evaluator.metric_name = cfg.evaluation.metric
+
+    # Training
+    steps_per_epoch = min([len(data_loader) for data_loader, _ in train_objectives])  # if multiple trainingsets, sets will be repeated as in a round-robin queue, 1 epochs = full smallest dataset, increase epoch to cover more parts of the bigger ones
+    warmup_steps = math.ceil(steps_per_epoch * num_epochs * warmup_pct)
+    logging.info("Warmup steps: {}".format(warmup_steps))
+
+    train(model,
+          train_objectives=train_objectives,
+          evaluator=dev_evaluator,
+          epochs=num_epochs,
+          steps_per_epoch=steps_per_epoch,
+          evaluation_steps=max(steps_per_epoch // evals_per_epoch, cfg.evaluation.min_steps) if evals_per_epoch > 0 else 0,
+          warmup_steps=warmup_steps,
+          output_path=cfg.evaluation.best_model_output_path,
+          optimizer_class=optimizer,
+          optimizer_params={'lr': learning_rate},
+          checkpoint_path=cfg.checkpointing.path,
+          checkpoint_save_steps=max(steps_per_epoch // checkpoint_saves_per_epoch, cfg.checkpointing.min_steps) if checkpoint_saves_per_epoch else 0,
+          checkpoint_save_total_limit=cfg.checkpointing.total_limit,
+          checkpoint_save_after_each_epoch=cfg.checkpointing.always_save_after_each_epoch)
+
+    # If test set, then evaluate on test set...
+    if cfg.evaluation.testset:
+        logging.info(f"Loading final model from disk ({cfg.evaluation.best_model_output_path})")
+        model = SentenceTransformer(cfg.evaluation.best_model_output_path)
+
+        torch.cuda.empty_cache()
+        model.to(model._target_device)
+
+        logging.info(f"Reading the test set ({cfg.evaluation.testset})")
+        test_evaluator = get_evaluator_by_metric(cfg.evaluation.testset, cfg.evaluation.metric, cfg.evaluation.metric_avg, evaluation_loss, batch_size=batch_size, evaluator_name="testset")
+
+        logging.info(f"Evaluating model on the test set data...")
+        test_evaluator(model, output_path=cfg.evaluation.best_model_output_path)
 
 
-# Evaluation/development set
-dev_evaluator = None
-if path_devset:
-    logging.info(f"Reading development set ({path_devset})")
-    dev_evaluator = get_evaluator_by_metric(path_devset, eval_metric, evaluator_name="devset")
-
-# Training
-steps_per_epoch = min([len(data_loader) for data_loader, _ in train_objectives])  # if multiple trainingsets, sets will be repeated as in a round-robin queue, 1 epochs = full smallest dataset, increase epoch to cover more parts of the bigger ones
-warmup_steps = math.ceil(steps_per_epoch * num_epochs * warmup_pct)
-logging.info("Warmup steps: {}".format(warmup_steps))
-
-train(model, train_objectives=train_objectives,
-      evaluator=dev_evaluator,
-      epochs=num_epochs,
-      steps_per_epoch=steps_per_epoch,
-      evaluation_steps=max(steps_per_epoch // evals_per_epoch, MIN_EVALUATION_STEPS) if evals_per_epoch > 0 else 0,
-      warmup_steps=warmup_steps,
-      output_path=path_output,
-      optimizer_class=optimizer,
-      optimizer_params={'lr': learning_rate},
-      checkpoint_path=checkpoint_path,
-      checkpoint_save_steps=max(steps_per_epoch // checkpoint_saves_per_epoch, MIN_CHECKPOINT_SAVE_STEPS) if checkpoint_saves_per_epoch else 0,
-      checkpoint_save_total_limit=checkpoint_save_total_limit,
-      checkpoint_save_after_each_epoch=checkpoint_save_after_each_epoch,
-      callback=on_evaluation)
-
-
-# If test set, then evaluate on test set...
-if path_testset:
-    logging.info(f"Loading final model from disk ({path_output})")
-    model = SentenceTransformer(path_output)
-
-    torch.cuda.empty_cache()
-    model.to(model._target_device)
-
-    logging.info(f"Reading the test set ({path_testset})")
-    test_evaluator = get_evaluator_by_metric(path_testset, eval_metric, evaluator_name="testset")
-
-    logging.info(f"Evaluating model on the test set data...")
-    test_evaluator(model, output_path=path_output)
+if __name__ == '__main__':
+    main()
