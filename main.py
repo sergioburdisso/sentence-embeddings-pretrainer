@@ -25,9 +25,9 @@ from sentence_transformers.util import fullname, batch_to_device
 from sentence_transformers.evaluation import SentenceEvaluator, SimilarityFunction, EmbeddingSimilarityEvaluator
 from sentence_transformers.model_card_templates import ModelCardTemplate
 
-from similarity_evaluation import ClassificationEvaluator, LossEvaluator
-from similarity_datasets import SimilarityDataReader, SimilarityDataset, SimilarityDatasetContrastive
-from similiraty_losses import BaseLoss, SoftmaxLoss, CosineSimilarityLoss, DenoisingAutoEncoderLoss, MultipleNegativesRankingLoss
+from spretrainer.evaluation import ClassificationEvaluator, LossEvaluator
+from spretrainer.datasets import SimilarityDataReader, SimilarityDataset, SimilarityDatasetContrastive
+from spretrainer.losses import BaseLoss, SoftmaxLoss, CosineSimilarityLoss, DenoisingAutoEncoderLoss, MultipleNegativesRankingLoss
 
 logging.basicConfig(format='%(asctime)s - %(message)s', datefmt=r'%Y-%m-%d %H:%M:%S',
                     level=logging.INFO, handlers=[LoggingHandler()])
@@ -74,6 +74,7 @@ def get_dataset_by_loss(loss_name: str, data: Iterable) -> Dataset:
     elif loss_name == CosineSimilarityLoss.__name__:
         return SimilarityDataset(data, is_regression=True, normalize_value=True)
     elif loss_name == DenoisingAutoEncoderLoss.__name__:  # unsupervised
+        # Convert the list of sentences in `data` into a list of (original sentence, corrupted sentence)
         return datasets.DenoisingAutoEncoderDataset(data)
 
 
@@ -131,7 +132,7 @@ def get_evaluator_by_metric(path_evalset: str, metric: str, metric_avg: str = ""
                                        metric=metric, metric_avg=metric_avg,
                                        name=evaluator_name)
     elif metric == "loss":
-        loss_name = loss_model.__name__
+        loss_name = loss_model.__class__.__name__
         evalset = get_dataloader_by_loss(loss_name,
                                          get_dataset_by_loss(loss_name, data),
                                          batch_size=batch_size, shuffle=False)

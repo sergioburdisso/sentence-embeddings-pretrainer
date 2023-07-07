@@ -9,7 +9,7 @@ from . import BaseLoss
 logger = logging.getLogger(__name__)
 
 
-# NOTE: original code taken from sentence_bert.losses.SoftmaxLoss
+# Original code taken from sentence_bert.losses.SoftmaxLoss
 # (https://github.com/UKPLab/sentence-transformers/blob/master/sentence_transformers/losses/SoftmaxLoss.py)
 class SoftmaxLoss(BaseLoss):
     """

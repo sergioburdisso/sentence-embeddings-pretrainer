@@ -6,7 +6,7 @@ from sentence_transformers import SentenceTransformer
 from . import BaseLoss
 
 
-# NOTE: original code taken from sentence_bert.losses.CosineSimilarityLoss
+# Original code taken from sentence_bert.losses.CosineSimilarityLoss
 # (https://github.com/UKPLab/sentence-transformers/blob/master/sentence_transformers/losses/CosineSimilarityLoss.py)
 class CosineSimilarityLoss(BaseLoss):
     """

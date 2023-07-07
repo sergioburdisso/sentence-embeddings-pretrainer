@@ -7,7 +7,7 @@ from sentence_transformers import util
 from . import BaseLoss
 
 
-# NOTE: original code taken from sentence_bert.losses.MultipleNegativesRankingLoss
+# Original code taken from sentence_bert.losses.MultipleNegativesRankingLoss
 # (https://github.com/UKPLab/sentence-transformers/blob/master/sentence_transformers/losses/MultipleNegativesRankingLoss.py)
 class MultipleNegativesRankingLoss(BaseLoss):
     """
