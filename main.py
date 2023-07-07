@@ -422,7 +422,7 @@ def main(cfg: DictConfig) -> None:
         }
     )
     wandb.define_metric("epoch")
-    wandb.define_metric("epoch_score", step_metric="epoch")
+    wandb.define_metric(f"{cfg.evaluation.metric}_epoch", step_metric="epoch")
 
     # 2. Set up the model
     transformer_seq_encoder = models.Transformer(cfg.model.base, max_seq_length=cfg.model.max_seq_length)
