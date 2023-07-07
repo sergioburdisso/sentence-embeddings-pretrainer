@@ -41,11 +41,10 @@ CSV_COL_SENT1 = None
 CSV_COL_SENT2 = None
 CSV_COL_LABEL = None
 
-
+# TODO: add :param NAME: description to this and all the functions below...
 def get_loss_class_name(loss_name: str) -> str:
     """
     Convert to original-name to UpperCamelCase class name.
-    TODO: :param NAME: description to this and all the functions below...
     """
     return ''.join([w.capitalize() for w in loss_name.split('-')]) + "Loss"
 
@@ -455,8 +454,9 @@ def main(cfg: DictConfig) -> None:
 
         train_objectives.append((get_dataloader_by_loss(loss_name, data, batch_size=batch_size), loss_fn))
 
-    # Assuming here the first loss at [0] is the one is used
-    # For evaluation, should be somehow allow the user to specify a different one?
+    # In case evaluation metric is loss,
+    # We assume here the first loss at [0] is the one is used For evaluation
+    # (Should be somehow allow the user to specify a different one? e.g. cfg.evaluation.target_loss_ix?)
     _, evaluation_loss = train_objectives[0]
 
     # 3.2. Evaluation/development set
