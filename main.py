@@ -30,6 +30,7 @@ from sentence_transformers.model_card_templates import ModelCardTemplate
 
 from similarity_evaluation import ClassificationEvaluator, LossEvaluator
 from similarity_datasets import SimilarityDataReader, SimilarityDataset, SimilarityDatasetContrastive
+from similiraty_losses import SoftmaxLoss, CosineSimilarityLoss, DenoisingAutoEncoderLoss, MultipleNegativesRankingLoss, NAME2LOSS_MAP
 
 
 # TODO: use config file instead for below
@@ -56,8 +57,7 @@ pooling_mode = 'cls'  # ['mean', 'max', 'cls', 'weightedmean', 'lasttoken']
 # path_devset = 'data/AllNLI_dev.csv'
 # path_testset = 'data/AllNLI_test.csv'
 
-loss = 'denoising-autoencoder'
-# loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # "softmax", "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
+loss = ["denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity']  # "softmax", "denoising-autoencoder", 'multi-neg-ranking', 'cosine-similarity', multi-neg-ranking only positive pairs or positive pair + strong negative.
 loss_contrastive_label_pos="entailment"
 loss_contrastive_label_neg="contradiction"
 special_tokens = []  # ["[USR]", "[SYS]"]
@@ -66,16 +66,15 @@ eval_metric = "loss"  # "coorelation-score"  (Spearman correlation) + sklearn cl
 eval_metric_avg = "macro"  # "macro", "micro", "weighted" (ignore if not classification, )
 max_seq_length = None
 batch_size = 16
-num_epochs = 1
+num_epochs = 2
 evals_per_epoch = 50
 warmup_pct = 0.1
 learning_rate = 2e-5
 log_interval = 100
 optimizer = torch.optim.AdamW
-path_trainset = "data/dialogue_train_small.txt"
+path_trainset = ["data/dialogue.txt", "data/AllNLI_train.csv", "data/stsbenchmark_train.csv"]
 path_devset = "data/dialogue_eval.txt"
 path_testset = "data/dialogue_eval.txt"
-# path_trainset = ["data/dialogue.txt", "data/AllNLI_train.csv", "data/stsbenchmark_train.csv"]
 # path_devset = "data/stsbenchmark_dev.csv"
 # path_testset = "data/stsbenchmark_test.csv"
 path_output = "output/test"
@@ -129,6 +128,22 @@ def get_dataloader_by_loss(loss_name, dataset, shuffle=True):
         return datasets.NoDuplicatesDataLoader(dataset, batch_size=batch_size)
 
     return DataLoader(dataset, shuffle=shuffle, batch_size=batch_size, drop_last=True)
+
+
+def get_loss_by_name(loss_name, data):
+    if loss_name not in NAME2LOSS_MAP:
+        raise ValueError(f"Loss {loss_name} not supported.")
+
+    if loss_name == "softmax":
+        return SoftmaxLoss(model=model,
+                           sentence_embedding_dimension=model.get_sentence_embedding_dimension(),
+                           num_labels=data.num_labels)
+    elif loss_name == "multi-neg-ranking":
+        return MultipleNegativesRankingLoss(model=model)
+    elif loss_name == "cosine-similarity":
+        return CosineSimilarityLoss(model=model)
+    elif loss_name == "denoising-autoencoder":  # unsupervised
+        return DenoisingAutoEncoderLoss(model, tie_encoder_decoder=True)
 
 
 def get_evaluator_by_metric(path_evalset, metric, evaluator_name):
@@ -435,19 +450,7 @@ for ix, path in enumerate(path_trainset):
         data = SimilarityDataReader.read_csv(path, col_sent0=DEFAULT_NAME_COL_SENT1, col_sent1=DEFAULT_NAME_COL_SENT2, col_label=DEFAULT_NAME_COL_LABEL)
 
     data = get_dataset_by_loss(loss_name, data)
-
-    if loss_name == "softmax":
-        loss_fn = losses.SoftmaxLoss(model=model,
-                                     sentence_embedding_dimension=model.get_sentence_embedding_dimension(),
-                                     num_labels=data.num_labels)
-    elif loss_name == "multi-neg-ranking":
-        loss_fn = losses.MultipleNegativesRankingLoss(model=model)
-    elif loss_name == "cosine-similarity":
-        loss_fn = losses.CosineSimilarityLoss(model=model)
-    elif loss_name == "denoising-autoencoder":  # unsupervised
-        loss_fn = losses.DenoisingAutoEncoderLoss(model, tie_encoder_decoder=True)
-    else:
-        raise ValueError(f"Loss {loss_name} not supported.")
+    loss_fn = get_loss_by_name(loss_name, data)
 
     train_objectives.append((get_dataloader_by_loss(loss_name, data), loss_fn))
 
