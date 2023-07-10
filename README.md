@@ -35,7 +35,7 @@ contrastive_learning:
 
 evaluation:
   evaluations_per_epoch: 50  # how many evaluations to perform per epoch
-  min_steps: 100  # minimum number of steps for evaluations to happend
+  min_steps: 100  # minimum number of steps for evaluations to happend (replaces the standard "evaluation_steps", only if epoch is large enough the above applies)
   metric: "coorelation-score"  # "coorelation-score"  (Spearman correlation) or "f1-score", "accuracy", "recall", "precision" (sklearn classification_report metrics)
   metric_avg: "macro"  # "macro", "micro", "weighted" (ignore if not classification)
   devset: "data/testing/stsbenchmark_dev.csv"
@@ -147,6 +147,21 @@ $ python main.py 'target.trainsets=["data/testing/stsbenchmark_train.csv", "data
 > (Spearman correlation on dev set: 0.8651)  
 > (Spearman correlation on test set: 0.8416)
 
+## TODO
+
+- **:beers: Highest Priority:**
+
+  - [ ] Add custom `DataReader`s, `Dataset`s and/or `Dataloader`s for dialogue processing (so far only generic ones are provided).
+    - [ ] `DialogueReader` that can read dialogue in different file formats and return a unified structure (e.g. list of dict(s) with a given structure).
+      - Should the `DialogueReader` be also in charge of adding common special tokens? or is it better to leave to each `Dataset` object to do it?
+    - [ ] `ContextualizedTurnsDataset` (?) that given a dialogue (output of the above reader), and a policy (sliding window) returns (context, turn) pairs (thus, these pairs can be directly plugged to our pipeline).
+
+  _(:point_up_2: Once we have the above points covered we can start replicating, or creating our own, "turn/dialogue encoders" with dialogue corpus)._
+
+- **:chocolate_bar: Normal Priority**
+  - [ ] Improve doc strings and documentation in general.
+    - E.g. Most of the functions and classes lack proper :param descriptions
+  - [ ] Add unit tests for individual evaluators and losses (only `datasets` is covered right now).
 
 
 ## :pill: Testing
