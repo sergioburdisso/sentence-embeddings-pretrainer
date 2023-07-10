@@ -8,7 +8,7 @@ model:
 
 target:
   losses: ["denoising-auto-encoder", "multiple-negatives-ranking", "cosine-similarity"]  # "softmax"; "denoising-auto-encoder"; "multiple-negatives-ranking"; "cosine-similarity";
-  trainsets: ["data/dialogue.txt", "data/AllNLI_train.csv", "data/stsbenchmark_train.csv"]
+  trainsets: ["data/testing/dialogue.txt", "data/testing/AllNLI_train.csv", "data/testing/stsbenchmark_train.csv"]
 
 contrastive_learning:
   label_pos: "entailment"
@@ -19,9 +19,9 @@ evaluation:
   min_steps: 100  # minimum number of steps for evaluations to happend
   metric: "coorelation-score"  # "coorelation-score"  (Spearman correlation) or "f1-score", "accuracy", "recall", "precision" (sklearn classification_report metrics)
   metric_avg: "macro"  # "macro", "micro", "weighted" (ignore if not classification)
-  devset: "data/stsbenchmark_dev.csv"
-  testset: "data/stsbenchmark_test.csv"
-  best_model_output_path: "outputs/test"
+  devset: "data/testing/stsbenchmark_dev.csv"
+  testset: "data/testing/stsbenchmark_test.csv"
+  best_model_output_path: "outputs/testing"
 
 training:
   batch_size: 16
