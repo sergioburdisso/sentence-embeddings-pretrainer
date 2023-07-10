@@ -1,7 +1,7 @@
 import pytest
 import random
 
-from similarity_datasets import SimilarityDataReader, SimilarityDataset, SimilarityDatasetContrastive
+from spretrainer.datasets import SimilarityDataReader, SimilarityDataset, SimilarityDatasetContrastive
 
 PATH_DATASET_LABEL = "tests/data/dataset_labels.csv"
 PATH_DATASET_LABEL_SPLITS = "tests/data/dataset_labels_splits.csv"
@@ -14,7 +14,7 @@ def test_dataset_raw():
     # Error cases
     with pytest.raises(KeyError):
         data = SimilarityDataset(
-            SimilarityDataReader.read_csv(PATH_DATASET_LABEL)
+            SimilarityDataReader.read_csv(PATH_DATASET_LABEL, col_sent0="sentence1", col_sent1="sentence2")
         )
     with pytest.raises(KeyError):
         data = SimilarityDataset(
